@@ -84,15 +84,15 @@ class Sandbox:
     def prep_scp_cmd(self, src: str, dst: str):
         return ["scp"] + self.ssh_opts(True) + [
             f"{src}",
-            f"sandbox@localhost:{dst}"
+            f"{self.ssh_config["username"]}@localhost:{dst}"
         ]
     
     def run_ssh_cmd(self, cmd: str):
-        return subprocess.run(self.prep_ssh_cmd(cmd), check=True, capture_output=True, text=True)
+        return subprocess.run(self.prep_ssh_cmd(cmd), check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def bg_ssh_cmd(self, cmd: str, stdout, stderr):
         with open(stdout, 'w', encoding="utf8") as out_file, open(stderr, 'w', encoding="utf8") as err_file:
-            self._bg_subproc.append(subprocess.Popen(self.prep_ssh_cmd(cmd),stdout=out_file, stderr=err_file))
+            self._bg_subproc.append(subprocess.Popen(self.prep_ssh_cmd(cmd),stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file))
             
     @property
     def _scp_client(self):
@@ -141,21 +141,32 @@ class Sandbox:
         
         os.chmod(ssh_util, 0o0700)
 
-        scp_util = os.path.join(bin_dir, "scp")
+        ssh_opts = " ".join(self.ssh_opts(True))
+        cp_to = os.path.join(bin_dir, "cp-to-sbx")
 
-        with open(scp_util, 'w', encoding="utf8") as fd:
+        with open(cp_to, 'w', encoding="utf8") as fd:
             fd.write("#!/bin/bash\n")
-            fd.write(" ".join(self.prep_scp_cmd('"$1"', '"$2"')) + "\n")
+            cmd = f'scp {ssh_opts} "$1" {self.ssh_config["username"]}@localhost:"$2"'
+            fd.write(cmd + "\n")
         
-        os.chmod(scp_util, 0o0700)
+        os.chmod(cp_to, 0o0700)
 
-        return [ssh_util, scp_util]
+        cp_from = os.path.join(bin_dir, "cp-from-sbx")
+
+        with open(cp_from, 'w', encoding="utf8") as fd:
+            fd.write("#!/bin/bash\n")
+            cmd = f'scp {ssh_opts} {self.ssh_config["username"]}@localhost:"$1" "$2"'
+            fd.write(cmd + "\n")
+        
+        os.chmod(cp_from, 0o0700)
+
+        return [ssh_util, cp_to, cp_from]
 
 
     
     def run_qemu_command(self, command):
         if self._qemu_process.poll() is not None:
-            raise Exception(f"qemu command stopped unexpectedely, inspect {stderr}")
+            raise Exception(f"qemu command stopped unexpectedely")
 
         async def _run_qemu_cmd(cmd):
             qmp = QMPClient('blah')
@@ -212,12 +223,18 @@ def build_analysis_metadata(sbx, kunai_path, kunai_args, sample_args, timeout):
 
     return meta
 
+def is_not_none_obj(obj, class_or_tuple):
+    if obj is not None:
+        return isinstance(obj, class_or_tuple)
+    return False
+
 if __name__ == "__main__":
     ANALYSIS_FILENAME = "analysis.yaml"
     KUNAI_LOG_FILENAME = "kunai.jsonl"
 
     parser = argparse.ArgumentParser(description="Sandbox runner script")
     parser.add_argument("--copy", type=str, action="append", help="Copy file to VM (expected format /src/path:/dst/path)")
+    parser.add_argument("--test", action="store_true", help="Run uname command in sandbox")
     parser.add_argument("-i", "--interactive", action="store_true", help="Does nothing but opens an interactive shell in the VM")
     parser.add_argument("--kunai-args", type=str, help="Additional argument to pass to kunai executable.")
     parser.add_argument("-c", "--config", required=True,  help="Sandbox configuration")
@@ -244,8 +261,11 @@ if __name__ == "__main__":
     tcpdump_cfg = analysis_cfg["tcpdump"]
     sbx = Sandbox(config)
 
+    if args.output_dir is None and not args.interactive:
+        parser.error("--output-dir must be set for any non-interactive run")
+
     # we create output directory
-    if args.output_dir:
+    if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
     
     if args.timeout is not None:
@@ -271,10 +291,10 @@ if __name__ == "__main__":
         if args.interactive:
             # we need to be sure no other previous command took
             # stdin otherwise we won't see what we type
-            subprocess.run(sbx.prep_ssh_cmd(""))
+            subprocess.run(sbx.prep_ssh_cmd(""), check=False)
             sandbox_stop_no_fail(sbx)
             sys.exit(0)
-
+        
         META = None
         kunai_ouptut = os.path.join(args.output_dir, KUNAI_LOG_FILENAME)
 
@@ -302,12 +322,20 @@ if __name__ == "__main__":
             sbx.run_ssh_cmd(f"sudo chmod +x {kunai_dst}")
             
             # good time to dump metadata
+            sample_args = sample_args if not args.test else []
             META = build_analysis_metadata(sbx, kunai_dst, kunai_cfg["args"], sample_args, analysis_cfg["timeout"])
 
             str_kunai_args = " ".join(kunai_cfg["args"])
 
-            full_kunai_cmd = f"sudo {kunai_dst} {str_kunai_args} 1> /boot/kunai.stdout.efi 2> /boot/kunai.stderr.efi &"
+            # trick to prevent being encrypted by cryptolocker
+            # we store kunai output within /boot directory
+            kunai_stdout="/boot/kunai.stdout.efi"
+            kunai_stderr="/boot/kunai.stderr.efi"
+            full_kunai_cmd = f"sudo {kunai_dst} {str_kunai_args} 1> {kunai_stdout} 2> {kunai_stderr} &"
 
+            # some ransomware samples kill ongoing SSH connection so we
+            # better make a runner script to execute kunai and fetch
+            # the results later
             with tempfile.NamedTemporaryFile(mode="w") as fd:
                 fd.write("#!/bin/bash\n")
                 fd.write(f"{full_kunai_cmd}")
@@ -316,9 +344,6 @@ if __name__ == "__main__":
                 sbx.run_ssh_cmd("chmod +x /tmp/run.sh")
 
             print(f"running kunai: {full_kunai_cmd}")
-            #sbx.bg_ssh_cmd(full_kunai_cmd,
-                #stdout=kunai_ouptut,
-                #stderr=os.path.join(args.output_dir,"kunai.stderr"))
             sbx.run_ssh_cmd("sudo /tmp/run.sh")
 
             print("waiting kunai to start")
@@ -327,9 +352,14 @@ if __name__ == "__main__":
                     stdout=os.path.join(args.output_dir, "tracepipe.stdout"),
                     stderr=os.path.join(args.output_dir, "tracepipe.stderr"))
             time.sleep(5)
+        
+        if args.test:
+            print("running test")
+            sbx.bg_ssh_cmd("uname -a", 
+                stdout=os.path.join(args.output_dir,"test.stdout"),
+                stderr=os.path.join(args.output_dir,"test.stderr"))
 
         if args.SAMPLE_COMMAND_LINE:
-            
             print("running sample")
             str_sample_args = " ".join(sample_args)
             sample_run_cmd = f"sudo -u {args.run_as} /tmp/sample.bin {str_sample_args}"
@@ -341,7 +371,7 @@ if __name__ == "__main__":
                 stderr=os.path.join(args.output_dir,"sample.stderr"))
         
 
-        print("waiting analysis to finish: {}s".format(analysis_cfg["timeout"]))
+        print(f"waiting analysis to finish: {analysis_cfg["timeout"]}s")
         for i in range(analysis_cfg["timeout"]):
             print(".", end="" if i % 60 != 0 or i == 0 else "\n", flush=True)
             time.sleep(1)
@@ -349,22 +379,26 @@ if __name__ == "__main__":
         print("analysis finished")
         print("collecting files")
 
-        sbx.download_file("/boot/kunai.stdout.efi", kunai_ouptut)
-        sbx.download_file("/boot/kunai.stderr.efi", os.path.join(args.output_dir,"kunai.stderr"))
+        sbx.download_file(kunai_stdout, kunai_ouptut)
+        sbx.download_file(kunai_stderr, os.path.join(args.output_dir,"kunai.stderr"))
         sandbox_stop_no_fail(sbx)
 
         print("processing pcap file")
         tmp = f"{sbx.pcap_file}.tmp"
-        subprocess.run(["tcpdump", "-r", sbx.pcap_file, "-w", tmp, tcpdump_cfg["filter"]], check=True)
-        shutil.move(tmp, os.path.join(args.output_dir, "dump.pcap"))
+        if is_not_none_obj(tcpdump_cfg["filter"], str):
+            subprocess.run(["tcpdump", "-r", sbx.pcap_file, "-w", tmp, tcpdump_cfg["filter"]], check=True)
+            shutil.move(tmp, os.path.join(args.output_dir, "dump.pcap"))
+        else:
+            shutil.move(sbx.pcap_file, os.path.join(args.output_dir, "dump.pcap"))
 
         print("dumping analysis metadata")
         if META is not None:
-            with open(os.path.join(args.output_dir, ANALYSIS_FILENAME), "w") as fd:
+            with open(os.path.join(args.output_dir, ANALYSIS_FILENAME), "w", encoding="utf8") as fd:
                 yaml.dump(META, fd)
 
         print("cleaning up")
-        os.remove(sbx.pcap_file)
+        if os.path.isfile(sbx.pcap_file):
+            os.remove(sbx.pcap_file)
 
     except Exception as e:
         # whatever happens we stop sandbox
