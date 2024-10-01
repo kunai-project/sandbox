@@ -6,7 +6,7 @@ A key feature is the generation of detailed Kunai traces and network traffic dum
 
 To have an idea of the data which can be collected with this platform, please visit: https://helga.circl.lu/NGSOTI/malware-dataset
 
-# How to use
+# How to use ?
 
 ## Install Python requirements
 
