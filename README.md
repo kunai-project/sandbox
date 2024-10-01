@@ -5,3 +5,98 @@ This project hosts a platform for sandboxing and analyzing malware samples using
 A key feature is the generation of detailed Kunai traces and network traffic dumps, providing detection engineers with direct access to critical insights such as behavioral patterns, system-level activities, and network interactions. This actionable data simplifies the creation of detection rules and significantly accelerates the development of effective defenses against emerging threats.
 
 To have an idea of the data which can be collected with this platform, please visit: https://helga.circl.lu/NGSOTI/malware-dataset
+
+# How to use
+
+## Install Python requirements
+
+Install the necessary Python requirements (the way you prefer)
+Here is a possibility:
+
+```bash
+python -m venv ./env
+source ./env/bin/activate
+pip install -r requirements.txt
+```
+
+## Preparing VMs
+
+Make sure you are running the follwing scripts and command **from within
+the virtual environment** you have created.
+
+### 1. download working image(s)
+
+```bash
+# this would download SEVERAL known working qemu images from debian/ubuntu repositories
+./scripts/download-images.sh
+```
+**NB:** alternatively you can take a download link in that script and download the file
+
+### 2. initializing the sandbox 
+
+```bash
+./scripts/sandbox-init.sh /path/to/qcow/image /path/to/prepared/sandbox
+```
+
+**NB:** this step will prompt you for your root password as we need to mount the qcow image to extract `vmlinuz` and `initrd` files.
+In case this is something you want to avoid, prepare the VMs in a Linux container.
+
+This initialization takes more or less time depending if you are relying on full system emulation or if you benefit from KVM acceleration.
+Anyway, you must wait for the script to terminate before going further.
+
+### 3. adjust sandbox configuration file
+
+```bash
+# use path to prepared sandbox from previous step
+vim /path/to/prepared/sandbox/config.yaml
+```
+
+```yaml
+# required changes:
+qemu:
+  # change this
+  distribution: change_me
+analysis:
+  kunai:
+    # be careful of pointing to the right architecture bin
+    path: /path/to/kunai
+    # this is not mandatory but kunai CLI arguments can be changed here
+    args: []
+```
+
+### 4. test that your VM is working
+
+```bash
+# this will spawn an interactive shell in the VM
+sandbox.py -c /path/to/prepared/sandbox/config.yaml -i
+```
+
+### 5. test that the sandbox is working
+
+```bash
+# we run a test for 5s and store analysis results in directory /path/to/analysis
+./sandbox.py -t 5 -c /path/to/prepared/sandbox/config.yaml --test -o /path/to/analysis
+
+# inspect the results in output directory
+ls -hail /path/to/analysis
+```
+
+### 6. run a sample in the sandbox
+
+If you do not have a malware sample or if you don't want to run one just
+for the purpose of testing, you can just retrieve a binary from the VM
+
+```bash
+# by default the analysis timeout is 60s
+./sandbox.py -c /path/to/prepared/sandbox/config.yaml -o /path/to/analysis -- /path/to/sample --some=sample --args
+
+# inspect the results in output directory
+ls -hail /path/to/analysis
+```
+
+You have everything ready to run your first malware sample in the sandbox
+
+
+
+
+
