@@ -41,9 +41,19 @@ function ubuntu_dl {
 }
 
 # put here downloads known to create working sandbox images
+## debian
+### bullseye
 debian_dl https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2
+debian_dl https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-arm64.qcow2
+
+### bookworm
 debian_dl https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
 debian_dl https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2
 
-ubuntu_dl https://cloud-images.ubuntu.com/oracular/20240531/oracular-server-cloudimg-amd64.img
-
+## ubuntu
+### oracular images
+ubuntu_dl https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img
+ubuntu_dl https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-arm64.img
+### noble images
+ubuntu_dl https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+ubuntu_dl https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img
