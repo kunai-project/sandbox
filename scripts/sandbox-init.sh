@@ -12,7 +12,6 @@
 IMAGE="$1"
 OUT="$2"
 
-
 if [[ ! $OUT || ! $IMAGE ]]
 then
     echo "Usage: $0 QCOW2_IMAGE OUT_DIR"
@@ -24,7 +23,7 @@ set -euxo pipefail
 mkdir -p $OUT
 
 # cleanup stuff
-rm -f $OUT/vmlinuz* $OUT/initr* $OUT/*.qcow2
+rm -f $OUT/vmlinuz* $OUT/initr* $OUT/*.qcow2 $OUT/*.img
 
 cp $IMAGE $OUT
 
@@ -68,7 +67,7 @@ SSH_PUB_KEY=$(cat ssh/sandbox.pub | cut -d ' ' -f -2)
 OS=$(cut -d '-' -f 1 <<<$IMAGE_FILE)
 
 # if USERNAME is set takes it otherwise takes default "sandbox"
-USERNAME=${USERNAME-sandbox}
+SBX_USER=${SBX_USER-sandbox}
 # if PASSWORD is set takes it otherwise takes default "password"
 PASSWORD=${PASSWORD-password}
 
@@ -97,10 +96,10 @@ packages:
   - strace
 
 users:
-  - name: $USERNAME
+  - name: $SBX_USER
     sudo: ALL=(ALL) NOPASSWD:ALL
     groups: users, admin
-    home: /home/$USERNAME
+    home: /home/$SBX_USER
     shell: /bin/bash
     lock_passwd: false
     plain_text_passwd: '$PASSWORD'
@@ -109,7 +108,7 @@ users:
 ssh_pwauth: True
 chpasswd:
   list: |
-    $USERNAME:$PASSWORD
+    $SBX_USER:$PASSWORD
   expire: False
 
 runcmd:
@@ -124,12 +123,19 @@ genisoimage -output init.iso -volid cidata -joliet -rock user-data meta-data
 # we get an error when restoring snapshot if we don't keep init.iso
 # in command
 
+# kernel command line parameters
+CMDLINE_LINUX=${CMDLINE_LINUX-}
+CMDLINE_LINUX="lsm=lockdown,capability,landlock,yama,apparmor,bpf ${CMDLINE_LINUX}"
+
+QEMU_ARGS=${QEMU_ARGS-}
+
 if [[ $ARCH == "aarch64" ]]
 then
-  BASE_CMD="qemu-system-$ARCH -M virt -cpu cortex-a57 -m 4G -smp 4 -kernel $(realpath ./vmlinuz*) -initrd $(realpath ./initr*) -append \"root=/dev/vda1\" -drive file=$(realpath $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom $(realpath init.iso) -boot d -nographic"
+  CPU=${CPU-cortex-a57}
+  BASE_CMD="qemu-system-$ARCH -M virt -cpu $CPU -m 4G -smp 4 -kernel $(realpath ./vmlinuz*) -initrd $(realpath ./initr*) -append \"root=/dev/vda1 $CMDLINE_LINUX\" -drive file=$(realpath $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom $(realpath init.iso) -boot d -nographic $QEMU_ARGS"
 elif [[ $ARCH == "x86_64" ]]
 then
-  BASE_CMD="qemu-system-$ARCH -m 4G -smp 4 -kernel $(realpath ./vmlinuz*) -initrd $(realpath ./initr*) -append \"root=/dev/vda1 console=ttyS0\" -drive file=$(realpath $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom $(realpath init.iso) -boot d -nographic -enable-kvm"
+  BASE_CMD="qemu-system-$ARCH -m 4G -smp 4 -kernel $(realpath ./vmlinuz*) -initrd $(realpath ./initr*) -append \"root=/dev/vda1 console=ttyS0 $CMDLINE_LINUX\" -drive file=$(realpath $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom $(realpath init.iso) -boot d -nographic -enable-kvm $QEMU_ARGS"
 fi
 
 echo $BASE_CMD -netdev user,id=net0 -monitor unix:qemu-monitor,server,nowait | bash > install.log &
@@ -160,9 +166,8 @@ echo "quit" | socat - ./qemu-monitor
 $GEN_CONFIG -s $SNAPSHOT -r $(realpath ./) -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
 
 cat <<EOF >> config.yaml
-
 ssh:
-  username: "sandbox"
+  username: "$SBX_USER"
   identity: "$(realpath ./ssh/sandbox)"
 
 analysis:
