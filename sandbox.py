@@ -26,21 +26,38 @@ class Sandbox:
         self._ssh_port = random.randint(1025, 65535)
         self._bg_subproc = []
         self.__scp_client = None
+        # this is set by main
+        self._config_dir = os.path.dirname(sandbox_cfg["path"])
 
     @property
-    def pcap_file(self):
+    def pcap_file(self) -> str:
         return self._pcap_file
 
     @property
-    def qemu_config(self):
+    def qemu_config(self) -> dict:
         return self._sandbox_cfg["qemu"]
 
     @property
-    def ssh_config(self):
+    def ssh_config(self) -> dict:
         return self._sandbox_cfg["ssh"]
-    
-    def _qemu_rundir_file(self, path):
-        return os.path.join(os.path.realpath(self.qemu_config["run-dir"]), path)
+
+    @property
+    def ssh_identity(self) -> str:
+        return self._resolve_rel_path_to_config(self.ssh_config["identity"])
+
+    @property
+    def _qemu_run_dir(self) -> str:
+        return self._resolve_rel_path_to_config(self.qemu_config["run-dir"])
+
+    def _resolve_rel_path_to_config(self, path):
+        rd = self.qemu_config["run-dir"]
+        if os.path.isabs(rd):
+            return os.path.join(rd, path)
+        else:
+            return os.path.realpath(os.path.join(self._config_dir, rd, path))
+
+    def _qemu_rundir_file(self, path) -> str:
+        return os.path.join(self._qemu_run_dir, path)
 
     @property
     def _qmp_sock(self):
@@ -66,7 +83,7 @@ class Sandbox:
         
         return command
     
-    def ssh_opts(self, uppercase_port: bool):
+    def _ssh_opts(self, uppercase_port: bool):
         p_opt = "-P" if uppercase_port else "-p"
         return [
             "-q", 
@@ -74,25 +91,25 @@ class Sandbox:
             "StrictHostKeyChecking=no", 
             "-o", 
             "UserKnownHostsFile=/dev/null",
-            "-i", self.ssh_config["identity"],
+            "-i", self.ssh_identity,
             p_opt, str(self._ssh_port),
         ]
     
-    def prep_ssh_cmd(self, cmd: str):
-        return ["/usr/bin/ssh"] + self.ssh_opts(False) + [f"{self.ssh_config["username"]}@localhost"] + shlex.split(cmd)
+    def _prep_ssh_cmd(self, cmd: str):
+        return ["/usr/bin/ssh"] + self._ssh_opts(False) + [f"{self.ssh_config["username"]}@localhost"] + shlex.split(cmd)
     
-    def prep_scp_cmd(self, src: str, dst: str):
-        return ["scp"] + self.ssh_opts(True) + [
+    def _prep_scp_cmd(self, src: str, dst: str):
+        return ["scp"] + self._ssh_opts(True) + [
             f"{src}",
             f"{self.ssh_config["username"]}@localhost:{dst}"
         ]
     
     def run_ssh_cmd(self, cmd: str):
-        return subprocess.run(self.prep_ssh_cmd(cmd), check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return subprocess.run(self._prep_ssh_cmd(cmd), check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def bg_ssh_cmd(self, cmd: str, stdout, stderr):
         with open(stdout, 'w', encoding="utf8") as out_file, open(stderr, 'w', encoding="utf8") as err_file:
-            self._bg_subproc.append(subprocess.Popen(self.prep_ssh_cmd(cmd),stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file))
+            self._bg_subproc.append(subprocess.Popen(self._prep_ssh_cmd(cmd),stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file))
             
     @property
     def _scp_client(self):
@@ -103,8 +120,9 @@ class Sandbox:
         if reset:
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect("localhost", username=self.ssh_config["username"], port=self._ssh_port, key_filename=self.ssh_config["identity"])
+            ssh_client.connect("localhost", username=self.ssh_config["username"], port=self._ssh_port, key_filename=self.ssh_identity)
             self.__scp_client = ssh_client.open_sftp()
+
         return self.__scp_client
 
     def upload_file(self, local: str, remote: str):
@@ -120,14 +138,18 @@ class Sandbox:
         print(" ".join(self._qemu_command))
 
         with open(stdout, 'w', encoding="utf8") as out_file, open(stderr, 'w', encoding="utf8") as err_file:
-            self._qemu_process = subprocess.Popen(self._qemu_command, stdin=subprocess.DEVNULL ,stdout=out_file, stderr=err_file)
+            self._qemu_process = subprocess.Popen(self._qemu_command, stdin=subprocess.DEVNULL ,stdout=out_file, stderr=err_file, cwd=self._qemu_run_dir)
 
         # we wait a bit to make sure qemu runs
         time.sleep(1)
 
         # qemu command should not fail
-        if self._qemu_process.poll() is not None:
-            raise Exception(f"qemu command failed, inspect {stderr}")
+        rc = self._qemu_process.poll()
+        if rc is not None:
+            raise subprocess.CalledProcessError(
+                rc,
+                self._qemu_command,
+                f"qemu command failed, inspect {stderr}")
     
     def dump_utils(self):
         bin_dir = self._qemu_rundir_file("bin")
@@ -137,11 +159,11 @@ class Sandbox:
 
         with open(ssh_util, 'w', encoding="utf8") as fd:
             fd.write("#!/bin/bash\n")
-            fd.write(" ".join(self.prep_ssh_cmd("$@")) + "\n")
+            fd.write(" ".join(self._prep_ssh_cmd("$@")) + "\n")
         
         os.chmod(ssh_util, 0o0700)
 
-        ssh_opts = " ".join(self.ssh_opts(True))
+        ssh_opts = " ".join(self._ssh_opts(True))
         cp_to = os.path.join(bin_dir, "cp-to-sbx")
 
         with open(cp_to, 'w', encoding="utf8") as fd:
@@ -255,6 +277,7 @@ if __name__ == "__main__":
     # reading config
     with open(args.config, encoding="utf8") as fd:
         config = yaml.safe_load(fd)
+    config["path"] = args.config
 
     analysis_cfg = config["analysis"]
     kunai_cfg = analysis_cfg["kunai"]
@@ -291,7 +314,7 @@ if __name__ == "__main__":
         if args.interactive:
             # we need to be sure no other previous command took
             # stdin otherwise we won't see what we type
-            subprocess.run(sbx.prep_ssh_cmd(""), check=False)
+            subprocess.run(sbx._prep_ssh_cmd(""), check=False)
             sandbox_stop_no_fail(sbx)
             sys.exit(0)
         
@@ -404,7 +427,3 @@ if __name__ == "__main__":
         # whatever happens we stop sandbox
         sandbox_stop_no_fail(sbx)
         raise e
-
-
-
-    

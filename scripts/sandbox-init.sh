@@ -132,10 +132,10 @@ QEMU_ARGS=${QEMU_ARGS-}
 if [[ $ARCH == "aarch64" ]]
 then
   CPU=${CPU-cortex-a57}
-  BASE_CMD="qemu-system-$ARCH -M virt -cpu $CPU -m 4G -smp 4 -kernel $(realpath ./vmlinuz*) -initrd $(realpath ./initr*) -append \"root=/dev/vda1 $CMDLINE_LINUX\" -drive file=$(realpath $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom $(realpath init.iso) -boot d -nographic $QEMU_ARGS"
+  BASE_CMD="qemu-system-$ARCH -M virt -cpu $CPU -m 4G -smp 4 -kernel $(basename ./vmlinuz*) -initrd $(basename ./initr*) -append \"root=/dev/vda1 $CMDLINE_LINUX\" -drive file=$(basename $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom init.iso -boot d -nographic $QEMU_ARGS"
 elif [[ $ARCH == "x86_64" ]]
 then
-  BASE_CMD="qemu-system-$ARCH -m 4G -smp 4 -kernel $(realpath ./vmlinuz*) -initrd $(realpath ./initr*) -append \"root=/dev/vda1 console=ttyS0 $CMDLINE_LINUX\" -drive file=$(realpath $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom $(realpath init.iso) -boot d -nographic -enable-kvm $QEMU_ARGS"
+  BASE_CMD="qemu-system-$ARCH -m 4G -smp 4 -kernel $(basename ./vmlinuz*) -initrd $(basename ./initr*) -append \"root=/dev/vda1 console=ttyS0 $CMDLINE_LINUX\" -drive file=$(basename $IMAGE_FILE),if=virtio -device virtio-net-pci,netdev=net0 -cdrom init.iso -boot d -nographic -enable-kvm $QEMU_ARGS"
 fi
 
 echo $BASE_CMD -netdev user,id=net0 -monitor unix:qemu-monitor,server,nowait | bash > install.log &
@@ -163,12 +163,12 @@ echo "info snapshots" | socat - ./qemu-monitor
 echo "quit" | socat - ./qemu-monitor
 
 # calls gen-config.py
-$GEN_CONFIG -s $SNAPSHOT -r $(realpath ./) -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
+$GEN_CONFIG -s $SNAPSHOT -r ./ -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
 
 cat <<EOF >> config.yaml
 ssh:
   username: "$SBX_USER"
-  identity: "$(realpath ./ssh/sandbox)"
+  identity: "./ssh/sandbox"
 
 analysis:
   timeout: 60
