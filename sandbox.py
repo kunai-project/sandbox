@@ -96,12 +96,14 @@ class Sandbox:
         ]
     
     def _prep_ssh_cmd(self, cmd: str):
-        return ["/usr/bin/ssh"] + self._ssh_opts(False) + [f"{self.ssh_config["username"]}@localhost"] + shlex.split(cmd)
+        username = self.ssh_config["username"]
+        return ["/usr/bin/ssh"] + self._ssh_opts(False) + [f"{username}@localhost"] + shlex.split(cmd)
     
     def _prep_scp_cmd(self, src: str, dst: str):
+        username = self.ssh_config["username"]
         return ["scp"] + self._ssh_opts(True) + [
             f"{src}",
-            f"{self.ssh_config["username"]}@localhost:{dst}"
+            f"{username}@localhost:{dst}"
         ]
     
     def run_ssh_cmd(self, cmd: str):
@@ -394,7 +396,7 @@ if __name__ == "__main__":
                 stderr=os.path.join(args.output_dir,"sample.stderr"))
         
 
-        print(f"waiting analysis to finish: {analysis_cfg["timeout"]}s")
+        print("waiting analysis to finish: {}s".format(analysis_cfg["timeout"]))
         for i in range(analysis_cfg["timeout"]):
             print(".", end="" if i % 60 != 0 or i == 0 else "\n", flush=True)
             time.sleep(1)
