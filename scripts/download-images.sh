@@ -51,6 +51,12 @@ debian_dl https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generi
 debian_dl https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2
 
 ## ubuntu
+### ubuntu 20.04 LTS focal (kernel 5.4)
+ubuntu_dl https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img
+ubuntu_dl https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img
+### Ubuntu Server 22.04 LTS (Jammy Jellyfish) 
+ubuntu_dl https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+ubuntu_dl https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img
 ### oracular images
 ubuntu_dl https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img
 ubuntu_dl https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-arm64.img
