@@ -8,15 +8,28 @@ To have an idea of the data which can be collected with this platform, please vi
 
 # How to use ?
 
-## Install Python requirements
+## Installation
 
-Install the necessary Python requirements (the way you prefer)
-Here is a possibility:
+This section assumes you already used pipx/uv and that installation directory is in your `PATH` environment variable.
+
+### Using `uv`
 
 ```bash
-python -m venv ./env
-source ./env/bin/activate
-pip install -r requirements.txt
+# installation
+uv tool install https://github.com/kunai-project/sandbox.git
+
+# testing
+kunai-sandbox -h
+```
+
+### Using `pipx`
+
+```bash
+# installation
+pipx install git+https://github.com/kunai-project/sandbox.git
+
+# testing
+kunai-sandbox -h
 ```
 
 ## Preparing VMs
@@ -68,14 +81,14 @@ analysis:
 
 ```bash
 # this will spawn an interactive shell in the VM
-sandbox.py -c /path/to/prepared/sandbox/config.yaml -i
+kunai-sandbox -c /path/to/prepared/sandbox/config.yaml -i
 ```
 
 ### 5. test that the sandbox is working
 
 ```bash
 # we run a test for 5s and store analysis results in directory /path/to/analysis
-./sandbox.py -t 5 -c /path/to/prepared/sandbox/config.yaml --test -o /path/to/analysis
+kunai-sandbox -t 5 -c /path/to/prepared/sandbox/config.yaml --test -o /path/to/analysis
 
 # inspect the results in output directory
 ls -hail /path/to/analysis
@@ -88,7 +101,7 @@ for the purpose of testing, you can just retrieve a binary from the VM
 
 ```bash
 # by default the analysis timeout is 60s
-./sandbox.py -c /path/to/prepared/sandbox/config.yaml -o /path/to/analysis -- /path/to/sample --some=sample --args
+./kunai-sandbox -c /path/to/prepared/sandbox/config.yaml -o /path/to/analysis -- /path/to/sample --some=sample --args
 
 # inspect the results in output directory
 ls -hail /path/to/analysis
