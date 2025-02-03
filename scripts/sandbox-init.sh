@@ -94,6 +94,7 @@ package_upgrade: $PACKAGE_UPGRADE
 
 packages:
   - strace
+  - busybox-static
 
 users:
   - name: $SBX_USER
