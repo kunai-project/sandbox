@@ -83,3 +83,13 @@ done < <(sudo fdisk -l $NBD | awk '/^\/dev/{print $1, $2}')
 # we disconnect our nbd
 sudo qemu-nbd -d $NBD
 
+# vmlinux suffix
+SUFF=$(echo vmlinuz-* | cut -d '-' -f 2-)
+
+# sometimes there are several initrd files 
+# extracted and we need to remove useless ones
+if [[ -f "initrd.img-$SUFF" ]]
+then
+    rm initrd.img.old
+    rm initrd.img
+fi
