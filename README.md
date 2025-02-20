@@ -20,6 +20,8 @@ uv tool install https://github.com/kunai-project/sandbox.git
 
 # testing
 kunai-sandbox -h
+# tool used to generate sandbox config
+ks-gen-config -h
 ```
 
 ### Using `pipx`
@@ -30,6 +32,8 @@ pipx install git+https://github.com/kunai-project/sandbox.git
 
 # testing
 kunai-sandbox -h
+# tool used to generate sandbox config
+ks-gen-config -h
 ```
 
 ## Preparing VMs
