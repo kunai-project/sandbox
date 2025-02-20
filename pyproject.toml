@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 kunai-sandbox = "kunai_sandbox:main"
+ks-gen-config = "kunai_sandbox.tools.gen_config:main"
 
 [build-system]
 requires = ["hatchling"]

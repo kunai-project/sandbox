@@ -32,7 +32,6 @@ CURRENT_DIR=$(dirname $(realpath $0))
 
 # paths to the tools we will need
 EXTRACTOR=$CURRENT_DIR/extract-initrd-vmlinuz.sh
-GEN_CONFIG=$CURRENT_DIR/gen-config.py
 
 # so far only two archs are supported
 ARCH=
@@ -176,24 +175,6 @@ elif grep -iP 'debian' <<< $VERSION_LINE;then
   DISTRIBUTION="debian"
 fi
 
-
-# calls gen-config.py
-$GEN_CONFIG -k $KERNEL -d $DISTRIBUTION -a $ARCH -s $SNAPSHOT -r ./ -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
-
-cat <<EOF >> config.yaml
-
-ssh:
-  username: "$SBX_USER"
-  identity: "./ssh/sandbox"
-
-analysis:
-  timeout: 60
-  kunai:
-    path: "change_me"
-    args: []
-  tcpdump:
-    # 10.0.2.0/24 is the default network for qemu
-    filter: '! (net 10.0.2.0/24 and port ssh)'
-EOF
-
-
+IDENTITY="./ssh/sandbox"
+# calls ks-gen-config (assumes sandbox tools have been installed)
+ks-gen-config -u $SBX_USER -i $IDENTITY -k $KERNEL -d $DISTRIBUTION -a $ARCH -s $SNAPSHOT -r ./ -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
