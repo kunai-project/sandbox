@@ -14,6 +14,7 @@ import tempfile
 import re
 import json
 import hashlib
+import weakref
 
 from qemu.qmp import QMPClient
 from datetime import datetime, timezone
@@ -136,12 +137,16 @@ class Sandbox:
     def __init__(self, sandbox_cfg: dict):
         self._sandbox_cfg = sandbox_cfg
         self._qemu_process = None
-        _, self._pcap_file = tempfile.mkstemp()
+        _, self._pcap_file = tempfile.mkstemp(prefix="kunai-sandbox-", suffix=".pcap")
         self._ssh_port = random.randint(1025, 65535)
         self._bg_subproc = []
         self.__scp_client = None
         # this is set by main
         self._config_dir = os.path.dirname(sandbox_cfg["path"])
+        weakref.finalize(self, self.cleanup)
+
+    def cleanup(self):
+        os.remove(self._pcap_file)
 
     @property
     def pcap_file(self) -> str:
