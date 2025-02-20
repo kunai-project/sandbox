@@ -51,9 +51,6 @@ the virtual environment** you have created.
 ./scripts/sandbox-init.sh /path/to/qcow/image /path/to/prepared/sandbox
 ```
 
-**NB:** this step will prompt you for your root password as we need to mount the qcow image to extract `vmlinuz` and `initrd` files.
-In case this is something you want to avoid, prepare the VMs in a Linux container.
-
 This initialization takes more or less time depending if you are relying on full system emulation or if you benefit from KVM acceleration.
 Anyway, you must wait for the script to terminate before going further.
 
