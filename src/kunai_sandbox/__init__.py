@@ -1,4 +1,3 @@
-import uuid
 import time
 import argparse
 import yaml
@@ -452,6 +451,11 @@ def main():
         help="Additional argument to pass to kunai executable.",
     )
     parser.add_argument("-c", "--config", required=True, help="Sandbox configuration")
+    parser.add_argument(
+        "--tmp",
+        action="store_true",
+        help="Duplicates sandbox directory into a temporary directory prior running it",
+    )
     parser.add_argument("-t", "--timeout", type=int, help="Analysis timeout in seconds")
     parser.add_argument("-f", "--force", action="store_true", help="Force analysis")
     parser.add_argument("--strace", action="store_true", help="Strace the sample")
@@ -484,6 +488,15 @@ def main():
             sys.exit(1)
     elif args.output_dir is not None and args.force and os.path.isdir(args.output_dir):
         shutil.rmtree(args.output_dir)
+
+    tmp_sbx_dir = None
+    if args.tmp:
+        tmp_sbx_dir = tempfile.mkdtemp(prefix="kunai-sandbox-")
+        cfg_base = os.path.basename(args.config)
+        sbx_dir = os.path.dirname(args.config)
+        print(f"creating a temporary sandbox in: {tmp_sbx_dir}")
+        shutil.copytree(sbx_dir, tmp_sbx_dir, dirs_exist_ok=True)
+        args.config = os.path.join(tmp_sbx_dir, cfg_base)
 
     # reading config
     with open(args.config, encoding="utf8") as fd:
@@ -551,6 +564,9 @@ def main():
             # stdin otherwise we won't see what we type
             subprocess.run(sbx._prep_ssh_cmd(""), check=False)
             sandbox_stop_no_fail(sbx)
+            if tmp_sbx_dir is not None:
+                print(f"removing temporary sandbox: {tmp_sbx_dir}")
+                shutil.rmtree(tmp_sbx_dir)
             sys.exit(0)
 
         META = None
@@ -707,13 +723,20 @@ def main():
         sandbox_stop_no_fail(sbx)
 
         print("processing pcap file")
-        tmp = f"{sbx.pcap_file}.tmp"
         if is_not_none_obj(tcpdump_cfg["filter"], str):
+            tmp_pcap_file = f"{sbx.pcap_file}.tmp"
             subprocess.run(
-                ["tcpdump", "-r", sbx.pcap_file, "-w", tmp, tcpdump_cfg["filter"]],
+                [
+                    "tcpdump",
+                    "-r",
+                    sbx.pcap_file,
+                    "-w",
+                    tmp_pcap_file,
+                    tcpdump_cfg["filter"],
+                ],
                 check=True,
             )
-            shutil.move(tmp, os.path.join(args.output_dir, "dump.pcap"))
+            shutil.move(tmp_pcap_file, os.path.join(args.output_dir, "dump.pcap"))
         else:
             shutil.move(sbx.pcap_file, os.path.join(args.output_dir, "dump.pcap"))
 
@@ -725,6 +748,10 @@ def main():
         print("cleaning up")
         if os.path.isfile(sbx.pcap_file):
             os.remove(sbx.pcap_file)
+
+        # remove temporary sandbox directory
+        if tmp_sbx_dir is not None:
+            shutil.rmtree(tmp_sbx_dir)
 
     except Exception as e:
         # whatever happens we stop sandbox
