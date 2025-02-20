@@ -165,10 +165,23 @@ done
 echo "info snapshots" | socat - ./qemu-monitor
 echo "quit" | socat - ./qemu-monitor
 
+# get linux kernel info
+VERSION_LINE=$(cat install.log | grep -i 'Linux version' | head -n 1)
+KERNEL=$(echo $VERSION_LINE | grep -oP 'Linux version .*?\s' | awk '{print $NF}' | cut -d '-' -f -2)
+DISTRIBUTION="change_me"
+
+if grep -iP 'ubuntu' <<< $VERSION_LINE;then
+  DISTRIBUTION="ubuntu"
+elif grep -iP 'debian' <<< $VERSION_LINE;then
+  DISTRIBUTION="debian"
+fi
+
+
 # calls gen-config.py
-$GEN_CONFIG -s $SNAPSHOT -r ./ -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
+$GEN_CONFIG -k $KERNEL -d $DISTRIBUTION -a $ARCH -s $SNAPSHOT -r ./ -- $(echo $BASE_CMD -netdev "user,id=net0,hostfwd=tcp::{{ssh-port-fw}}-:22" -object "filter-dump,id=dump,netdev=net0,file={{pcap-file}}") > config.yaml
 
 cat <<EOF >> config.yaml
+
 ssh:
   username: "$SBX_USER"
   identity: "./ssh/sandbox"

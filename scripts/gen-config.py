@@ -9,15 +9,21 @@ import sys
 import shlex
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
+    parser.add_argument("-a", "--arch", type=str, help="Architecture of the VM")
+    parser.add_argument(
+        "-d", "--distribution", type=str, help="Distribution of the sandbox"
+    )
+    parser.add_argument(
+        "-k", "--kernel", type=str, help="Kernel version of the sandbox"
+    )
     parser.add_argument("-s", "--snapshot", required=True)
     parser.add_argument("-r", "--run-dir", required=True)
-    parser.add_argument("COMMAND_LINE", nargs='*')
+    parser.add_argument("COMMAND_LINE", nargs="*")
 
     args = parser.parse_args()
 
-    # this is needed to process correctly -append in qemu CLI
+    # this is needed to process correctly -append in qemu CLI
     qemu_cli = shlex.split(" ".join(args.COMMAND_LINE))
     config = {}
     config["qemu"] = {}
@@ -25,6 +31,10 @@ if __name__ == "__main__":
     config["qemu"]["args"] = qemu_cli[1:]
     config["qemu"]["snapshot"] = args.snapshot
     config["qemu"]["run-dir"] = args.run_dir
-    config["qemu"]["distribution"] = "change_me"
+    config["qemu"]["distribution"] = (
+        "change_me" if args.distribution is None else args.distribution
+    )
+    config["qemu"]["kernel"] = "change_me" if args.kernel is None else args.kernel
+    config["qemu"]["arch"] = "change_me" if args.arch is None else args.arch
 
     yaml.dump(config, sys.stdout, sort_keys=False)
