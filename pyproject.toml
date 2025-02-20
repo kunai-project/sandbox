@@ -3,7 +3,7 @@ name = "kunai-sandbox"
 version = "0.1.2"
 description = "Simple malware sandbox powered by Qemu and Kunai"
 readme = "README.md"
-authors = [{ name = "qjerome", email = "qjerome@rawsec.lu" }]
+authors = [{ name = "qjerome", email = "quentin.jerome@circl.lu" }]
 requires-python = ">=3.13"
 dependencies = [
     "paramiko>=3.5.0",
