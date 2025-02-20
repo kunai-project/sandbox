@@ -365,9 +365,7 @@ def main():
     parser.add_argument(
         "--no-dropped", action="store_true", help="Do not collect dropped files"
     )
-    parser.add_argument(
-        "--run", help="Run command (or script) before executing samples"
-    )
+    parser.add_argument("--run", help="Run command (or script) before executing sample")
     parser.add_argument("SAMPLE_COMMAND_LINE", nargs="*")
 
     args = parser.parse_args()
