@@ -53,6 +53,8 @@ fi
 # switching to output directory
 pushd $OUT
 
+# we resize qcow2 image to have a decent size
+qemu-img resize $IMAGE_FILE 60G
 
 # we need to extract vmlinuz and initrd to be cross-architecture
 $EXTRACTOR $IMAGE_FILE
