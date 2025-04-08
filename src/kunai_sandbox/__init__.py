@@ -15,7 +15,9 @@ import json
 import hashlib
 import weakref
 
-from pykunai.event import Query
+from pykunai.graph import KunaiGraph
+from pykunai.event import Query, Event, JqDict
+from pykunai.misp.export import KunaiMispEvent
 from qemu.qmp import QMPClient
 from datetime import datetime, timezone
 
@@ -119,10 +121,10 @@ class Sandbox:
             ["scp"] + self._ssh_opts(True) + [f"{src}", f"{username}@localhost:{dst}"]
         )
 
-    def run_ssh_cmd(self, cmd: str, capture_output=True):
+    def run_ssh_cmd(self, cmd: str, capture_output=True, check=True):
         return subprocess.run(
             self._prep_ssh_cmd(cmd),
-            check=True,
+            check=check,
             capture_output=capture_output,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -308,17 +310,21 @@ def sha256_file(file_path):
     return sha256.hexdigest()
 
 
-def events(sample, kunai_log_file):
+def events_generator(sample, kunai_log_file):
     with open(kunai_log_file, "r", encoding="utf8") as fd:
         q = Query(True)
         q.add_hashes([sha256_file(sample)])
         for line in fd.readlines():
-            event = json.loads(line)
+            event = Event(JqDict(json.loads(line)))
             if q.match(event):
                 yield event
 
 
-def main():
+# one can provide argv so that main can be called programatically
+def main(argv=None):
+    if argv is not None:
+        sys.argv = [sys.argv[0]] + argv
+
     ANALYSIS_FILENAME = "analysis.yaml"
     KUNAI_LOG_FILENAME = "kunai.jsonl"
 
@@ -354,6 +360,12 @@ def main():
     parser.add_argument("--strace", action="store_true", help="Strace the sample")
     parser.add_argument("--bpf-logs", action="store_true", help="Strace the sample")
     parser.add_argument(
+        "--sync-time", action="store_true", help="Sync time before running kunai"
+    )
+    parser.add_argument(
+        "--compress", action="store_true", help="Compress kunai log file"
+    )
+    parser.add_argument(
         "-o",
         "--output-dir",
         type=str,
@@ -365,16 +377,27 @@ def main():
     parser.add_argument(
         "--no-dropped", action="store_true", help="Do not collect dropped files"
     )
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="Generate an SVG graph out of sample's activity",
+    )
+    parser.add_argument(
+        "--misp",
+        action="store_true",
+        help="Generate a MISP event out of sample's activity",
+    )
     parser.add_argument("--run", help="Run command (or script) before executing sample")
     parser.add_argument("SAMPLE_COMMAND_LINE", nargs="*")
 
     args = parser.parse_args()
 
+    ANALYSIS_PATH = None
     if args.output_dir is not None:
-        analysis_path = os.path.join(args.output_dir, ANALYSIS_FILENAME)
+        ANALYSIS_PATH = os.path.join(args.output_dir, ANALYSIS_FILENAME)
 
     if args.output_dir is not None and not args.force:
-        if os.path.isfile(analysis_path):
+        if os.path.isfile(ANALYSIS_PATH):
             print("File has already been analyzed, use -f|--force to analyze it again")
             sys.exit(1)
     elif args.output_dir is not None and args.force and os.path.isdir(args.output_dir):
@@ -450,6 +473,21 @@ def main():
                 cmd = " ".join(e.cmd).replace(" ".join(sbx._prep_ssh_cmd("")), "")
                 print(f"failed to run {cmd}: {e.stderr}")
 
+        if args.sync_time:
+            # here we can put the different commands we want to try
+            sync_cmds = [
+                "sudo systemctl restart systemd-timesyncd",
+            ]
+
+            # we attempt at running time sync command but we don't fail
+            for cmd in sync_cmds:
+                try:
+                    sbx.run_ssh_cmd(cmd)
+                    # as soon as a command succeeded we break
+                    break
+                except Exception as e:
+                    print(f"failed to synchronize time in sandbox: {e}")
+
         if args.interactive:
             # we need to be sure no other previous command took
             # stdin otherwise we won't see what we type
@@ -461,8 +499,14 @@ def main():
             sys.exit(0)
 
         META = None
-        kunai_ouptut = os.path.join(args.output_dir, KUNAI_LOG_FILENAME)
-        dropped_files_dir = os.path.join(args.output_dir, "dropped")
+        SAMPLE_STDOUT = os.path.join(args.output_dir, "sample.stdout")
+        SAMPLE_STDERR = os.path.join(args.output_dir, "sample.stderr")
+        KUNAI_LOGS_PATH = os.path.join(args.output_dir, KUNAI_LOG_FILENAME)
+        KUNAI_STDERR = os.path.join(args.output_dir, "kunai.stderr")
+        PCAP_PATH = os.path.join(args.output_dir, "dump.pcap")
+        GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
+        MISP_EVENT_PATH = os.path.join(args.output_dir, "misp-event.json")
+        DROPPED_FILES_DIR = os.path.join(args.output_dir, "dropped")
 
         # preparing sample
         if args.SAMPLE_COMMAND_LINE:
@@ -522,6 +566,8 @@ def main():
                     stderr=os.path.join(args.output_dir, "tracepipe.stderr"),
                 )
             time.sleep(5)
+            # we delete kunai binary
+            sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
 
         if args.test:
             print("running test")
@@ -542,8 +588,8 @@ def main():
 
             sbx.bg_ssh_cmd(
                 sample_run_cmd,
-                stdout=os.path.join(args.output_dir, "sample.stdout"),
-                stderr=os.path.join(args.output_dir, "sample.stderr"),
+                stdout=SAMPLE_STDOUT,
+                stderr=SAMPLE_STDERR,
             )
 
         print("waiting analysis to finish: {}s".format(analysis_cfg["timeout"]))
@@ -554,20 +600,20 @@ def main():
         print("analysis finished")
         print("collecting files")
 
-        sbx.download_file(kunai_stdout, kunai_ouptut)
-        sbx.download_file(kunai_stderr, os.path.join(args.output_dir, "kunai.stderr"))
+        sbx.download_file(kunai_stdout, KUNAI_LOGS_PATH)
+        sbx.download_file(kunai_stderr, KUNAI_STDERR)
 
         if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
             print("downloading dropped files")
             cache = set()
-            for e in events(args.SAMPLE_COMMAND_LINE[0], kunai_ouptut):
+            for e in events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH):
                 if e["info"]["event"]["name"] == "write_close":
                     e_uuid = e["info"]["event"]["uuid"]
                     dropped_file = e["data"]["path"]
                     if dropped_file in cache:
                         continue
                     print(f"\ttrying to download: {dropped_file}")
-                    os.makedirs(dropped_files_dir, exist_ok=True)
+                    os.makedirs(DROPPED_FILES_DIR, exist_ok=True)
                     try:
                         # we update cache right now not to reprocess files failure
                         cache.add(dropped_file)
@@ -585,7 +631,7 @@ def main():
                             print("f\taborting file to big")
                             continue
 
-                        local_dir = os.path.join(dropped_files_dir, e_uuid)
+                        local_dir = os.path.join(DROPPED_FILES_DIR, e_uuid)
                         os.makedirs(local_dir)
                         local_file = os.path.join(local_dir, "file.bin")
                         sbx.download_file("/tmp/d", local_file)
@@ -596,7 +642,7 @@ def main():
                             continue
 
                         with open(
-                            os.path.join(dropped_files_dir, e_uuid, "event.json"),
+                            os.path.join(DROPPED_FILES_DIR, e_uuid, "event.json"),
                             "w",
                             encoding="utf8",
                         ) as fd:
@@ -627,14 +673,34 @@ def main():
                 ],
                 check=True,
             )
-            shutil.move(tmp_pcap_file, os.path.join(args.output_dir, "dump.pcap"))
+            shutil.move(tmp_pcap_file, PCAP_PATH)
         else:
-            shutil.move(sbx.pcap_file, os.path.join(args.output_dir, "dump.pcap"))
+            shutil.move(sbx.pcap_file, PCAP_PATH)
 
         print("dumping analysis metadata")
         if META is not None:
-            with open(analysis_path, "w", encoding="utf8") as fd:
+            with open(ANALYSIS_PATH, "w", encoding="utf8") as fd:
                 yaml.dump(META, fd)
+
+        if args.graph and args.output_dir is not None:
+            print("generating sample's activity graph")
+            graph = KunaiGraph()
+            graph.from_event_iterator(
+                events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
+            )
+            graph.to_svg(GRAPH_PATH)
+
+        if args.misp and args.output_dir is not None:
+            print("generating MISP event")
+            events = events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
+            kunai_misp_event = KunaiMispEvent(events)
+            kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
+            with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
+                fd.write(kunai_misp_event.into_misp_event().to_json())
+
+        if args.compress:
+            print("compressing kunai logs")
+            compress_file(KUNAI_LOGS_PATH)
 
         print("cleaning up")
         if os.path.isfile(sbx.pcap_file):
@@ -648,3 +714,7 @@ def main():
         # whatever happens we stop sandbox
         sandbox_stop_no_fail(sbx)
         raise e
+
+
+if __name__ == "__main__":
+    main()
