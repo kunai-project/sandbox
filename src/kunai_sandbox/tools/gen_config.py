@@ -56,7 +56,7 @@ def main():
     config["analysis"] = {
         "timeout": 60,
         "kunai": {"path": "change_me", "args": []},
-        "tcpdump": "! (net 10.0.2.0/24 and port ssh)",
+        "tcpdump": {"filter": "! (net 10.0.2.0/24 and port ssh)"},
     }
 
     yaml.dump(config, sys.stdout, sort_keys=False)
