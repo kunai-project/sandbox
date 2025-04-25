@@ -330,6 +330,38 @@ def events_generator(sample, kunai_log_file):
                 yield event
 
 
+def random_task_name():
+    # Define the list of strings
+    kthreads_names = [
+        "card1-crtc",
+        "cpuhp",
+        "dmcrypt_write",
+        "hwrng",
+        "idle_inject",
+        "iprt-",
+        "jbd2",
+        "kauditd",
+        "kcompactd0",
+        "kdevtmpfs",
+        "khugepaged",
+        "khungtaskd",
+        "ksgxd",
+        "ksmd",
+        "ksoftirqd",
+        "kswapd0",
+        "kthreadd",
+        "kworker",
+        "migration",
+        "oom_reaper",
+        "pool_workqueue_release",
+        "psimon",
+        "rcub",
+        "watchdogd",
+    ]
+
+    return random.choice(kthreads_names)
+
+
 # one can provide argv so that main can be called programatically
 def main(argv=None):
     if argv is not None:
@@ -553,7 +585,7 @@ def main(argv=None):
 
         print("uploading kunai binary")
         kunai_tmp_dst = "/tmp/kunai"
-        kunai_dst = "/usr/bin/tcpdumb"
+        kunai_dst = f"/usr/bin/{random_task_name()}"
         sbx.upload_file(kunai_cfg["path"], kunai_tmp_dst)
         sbx.run_ssh_cmd(f"sudo mv {kunai_tmp_dst} {kunai_dst}")
         sbx.run_ssh_cmd(f"sudo chmod +x {kunai_dst}")
