@@ -72,8 +72,7 @@ class Sandbox:
     def _qmp_sock(self):
         return self._qemu_rundir_file("qmp.sock")
 
-    @property
-    def _qemu_command(self):
+    def _qemu_command(self, loadvm=True):
         _args = list(self.qemu_config["args"])
 
         for i, arg in enumerate(_args):
@@ -85,8 +84,9 @@ class Sandbox:
 
         command = [self.qemu_config["command"]]
         command += _args
-        command.append("-loadvm")
-        command.append(self.qemu_config["snapshot"])
+        if loadvm:
+            command.append("-loadvm")
+            command.append(self.qemu_config["snapshot"])
         command.append("-qmp")
         command.append(f"unix:{self._qmp_sock},server,nowait")
 
@@ -169,18 +169,19 @@ class Sandbox:
     def download_file(self, remote: str, local: str):
         self.sftp_client.get(remote, local)
 
-    def start(self):
+    def start(self, loadvm=True):
         stdout = self._qemu_rundir_file("qemu.stdout")
         stderr = self._qemu_rundir_file("qemu.stderr")
 
-        print(" ".join(self._qemu_command))
+        qemu_cmd = self._qemu_command(loadvm)
+        print(" ".join(shlex.quote(arg) for arg in qemu_cmd))
 
         with (
             open(stdout, "w", encoding="utf8") as out_file,
             open(stderr, "w", encoding="utf8") as err_file,
         ):
             self._qemu_process = subprocess.Popen(
-                self._qemu_command,
+                qemu_cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=out_file,
                 stderr=err_file,
@@ -230,25 +231,34 @@ class Sandbox:
 
         return [ssh_util, cp_to, cp_from]
 
-    def run_qemu_command(self, command):
+    def run_qemu_console_command(self, command: str):
+        return self.run_qmp_command("human-monitor-command", {"command-line": command})
+
+    def run_qmp_command(self, command, arguments=None):
         if self._qemu_process.poll() is not None:
             raise Exception("qemu command stopped unexpectedely")
 
-        async def _run_qemu_cmd(cmd):
-            qmp = QMPClient("blah")
+        async def _run_qemu_cmd(cmd, arguments=None):
+            qmp = QMPClient("Kunai Sandbox Client")
             await qmp.connect(self._qmp_sock)
-            res = await qmp.execute(cmd)
+            res = await qmp.execute(cmd, arguments)
             await qmp.disconnect()
             return res
 
-        return asyncio.run(_run_qemu_cmd(command))
+        return asyncio.run(_run_qemu_cmd(command, arguments))
 
     def stop(self):
         # we terminate subprocesses
         for p in self._bg_subproc:
             if p.returncode is None:
                 p.terminate()
-        self.run_qemu_command("quit")
+        self.run_qmp_command("quit")
+
+    def __del__(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
 
 
 def sandbox_stop_no_fail(sbx):
@@ -387,6 +397,11 @@ def main(argv=None):
         action="store_true",
         help="Generate a MISP event out of sample's activity",
     )
+    parser.add_argument(
+        "--fix-vm",
+        action="store_true",
+        help="Attempts at fixing VM failing to load because it was created on another system",
+    )
     parser.add_argument("--run", help="Run command (or script) before executing sample")
     parser.add_argument("SAMPLE_COMMAND_LINE", nargs="*")
 
@@ -422,6 +437,20 @@ def main(argv=None):
     tcpdump_cfg = analysis_cfg["tcpdump"]
     sbx = Sandbox(config)
 
+    # we start the sandbox
+    if args.fix_vm:
+        # load VM without snapshot
+        sbx.start(loadvm=False)
+        # we wait a little time that the sandbox starts
+        time.sleep(20)
+        snapshot = sbx.qemu_config["snapshot"]
+        # we wait sandbox is ready
+        sbx.run_ssh_cmd("uptime")
+        sbx.run_qemu_console_command(f"delvm {snapshot}")
+        sbx.run_qemu_console_command(f"savevm {snapshot}")
+        sbx.stop()
+        sys.exit(0)
+
     if args.output_dir is None and not args.interactive:
         parser.error("--output-dir must be set for any non-interactive run")
 
@@ -437,283 +466,276 @@ def main(argv=None):
             sorted(set(shlex.split(args.kunai_args) + kunai_cfg["args"]))
         )
 
-    # we start the sandbox
     sbx.start()
 
-    try:
-        # we dump some utility scripts to easily connect to sandbox
-        for u in sbx.dump_utils():
-            print(f"utility to access your VM: {u}")
+    # we dump some utility scripts to easily connect to sandbox
+    for u in sbx.dump_utils():
+        print(f"utility to access your VM: {u}")
 
-        if args.copy is not None:
-            for copy in args.copy:
-                src, dst = copy.split(":", 2)
-                print(f"uploading file to VM: {src} -> {dst}")
-                sbx.upload_file(src, dst)
+    if args.copy is not None:
+        for copy in args.copy:
+            src, dst = copy.split(":", 2)
+            print(f"uploading file to VM: {src} -> {dst}")
+            sbx.upload_file(src, dst)
 
-        # run some preparatory commands
-        if args.run is not None:
+    # run some preparatory commands
+    if args.run is not None:
+        try:
+            if os.path.isfile(args.run):
+                tmp_file = os.path.join("/tmp", os.path.basename(args.run))
+                sbx.upload_file(args.run, tmp_file)
+                sbx.run_ssh_cmd(f"chmod +x {tmp_file}")
+                # run as daemon to prevent locking I/O
+                subprocess.Popen(
+                    sbx._prep_ssh_cmd(f"{tmp_file}"),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                print(f"running command: {args.run}")
+                sbx.run_ssh_cmd(args.run)
+        except subprocess.CalledProcessError as e:
+            # we remove all the SSH command line
+            cmd = " ".join(e.cmd).replace(" ".join(sbx._prep_ssh_cmd("")), "")
+            print(f"failed to run {cmd}: {e.stderr}")
+
+    if args.sync_time:
+        # here we can put the different commands we want to try
+        sync_cmds = [
+            "sudo systemctl restart systemd-timesyncd",
+        ]
+
+        # we attempt at running time sync command but we don't fail
+        for cmd in sync_cmds:
             try:
-                if os.path.isfile(args.run):
-                    tmp_file = os.path.join("/tmp", os.path.basename(args.run))
-                    sbx.upload_file(args.run, tmp_file)
-                    sbx.run_ssh_cmd(f"chmod +x {tmp_file}")
-                    # run as daemon to prevent locking I/O
-                    subprocess.Popen(
-                        sbx._prep_ssh_cmd(f"{tmp_file}"),
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                else:
-                    print(f"running command: {args.run}")
-                    sbx.run_ssh_cmd(args.run)
-            except subprocess.CalledProcessError as e:
-                # we remove all the SSH command line
-                cmd = " ".join(e.cmd).replace(" ".join(sbx._prep_ssh_cmd("")), "")
-                print(f"failed to run {cmd}: {e.stderr}")
+                sbx.run_ssh_cmd(cmd)
+                # as soon as a command succeeded we break
+                break
+            except Exception as e:
+                print(f"failed to synchronize time in sandbox: {e}")
 
-        if args.sync_time:
-            # here we can put the different commands we want to try
-            sync_cmds = [
-                "sudo systemctl restart systemd-timesyncd",
-            ]
-
-            # we attempt at running time sync command but we don't fail
-            for cmd in sync_cmds:
-                try:
-                    sbx.run_ssh_cmd(cmd)
-                    # as soon as a command succeeded we break
-                    break
-                except Exception as e:
-                    print(f"failed to synchronize time in sandbox: {e}")
-
-        if args.interactive:
-            # we need to be sure no other previous command took
-            # stdin otherwise we won't see what we type
-            subprocess.run(sbx._prep_ssh_cmd(""), check=False)
-            sandbox_stop_no_fail(sbx)
-            if tmp_sbx_dir is not None:
-                print(f"removing temporary sandbox: {tmp_sbx_dir}")
-                shutil.rmtree(tmp_sbx_dir)
-            sys.exit(0)
-
-        META = None
-        SAMPLE_STDOUT = os.path.join(args.output_dir, "sample.stdout")
-        SAMPLE_STDERR = os.path.join(args.output_dir, "sample.stderr")
-        KUNAI_LOGS_PATH = os.path.join(args.output_dir, KUNAI_LOG_FILENAME)
-        KUNAI_STDERR = os.path.join(args.output_dir, "kunai.stderr")
-        PCAP_PATH = os.path.join(args.output_dir, "dump.pcap")
-        GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
-        MISP_EVENT_PATH = os.path.join(args.output_dir, "misp-event.json")
-        DROPPED_FILES_DIR = os.path.join(args.output_dir, "dropped")
-
-        # preparing sample
-        if args.SAMPLE_COMMAND_LINE:
-            sample_cmd = args.SAMPLE_COMMAND_LINE
-            print(f"want to run: {sample_cmd}")
-            print(f"uploading: {sample_cmd[0]}")
-            sbx.upload_file(sample_cmd[0], "/tmp/sample.bin")
-            print("making sample executable")
-            sbx.run_ssh_cmd("chmod +x /tmp/sample.bin")
-
-            sample_args = sample_cmd[1:] if len(sample_cmd) > 1 else []
-
-        # running kunai
-        if kunai_cfg["path"] is not None:
-            if not os.path.isfile(kunai_cfg["path"]):
-                raise (IOError("kunai is configured but binary is missing"))
-
-            print("uploading kunai binary")
-            kunai_tmp_dst = "/tmp/kunai"
-            kunai_dst = "/usr/bin/tcpdumb"
-            sbx.upload_file(kunai_cfg["path"], kunai_tmp_dst)
-            sbx.run_ssh_cmd(f"sudo mv {kunai_tmp_dst} {kunai_dst}")
-            sbx.run_ssh_cmd(f"sudo chmod +x {kunai_dst}")
-
-            # good time to dump metadata
-            sample_args = sample_args if not args.test else []
-            META = build_analysis_metadata(
-                sbx, kunai_dst, kunai_cfg["args"], sample_args, analysis_cfg["timeout"]
-            )
-
-            str_kunai_args = " ".join(kunai_cfg["args"])
-
-            # trick to prevent being encrypted by cryptolocker
-            # we store kunai output within /boot directory
-            kunai_stdout = "/boot/kunai.stdout.efi"
-            kunai_stderr = "/boot/kunai.stderr.efi"
-            full_kunai_cmd = f"sudo {kunai_dst} {str_kunai_args} 1> {kunai_stdout} 2> {kunai_stderr} &"
-
-            # some ransomware samples kill ongoing SSH connection so we
-            # better make a runner script to execute kunai and fetch
-            # the results later
-            with tempfile.NamedTemporaryFile(mode="w") as fd:
-                fd.write("#!/bin/bash\n")
-                fd.write(f"{full_kunai_cmd}")
-                fd.flush()
-                sbx.upload_file(fd.name, "/tmp/run.sh")
-                sbx.run_ssh_cmd("chmod +x /tmp/run.sh")
-
-            print(f"running kunai: {full_kunai_cmd}")
-            sbx.run_ssh_cmd("sudo /tmp/run.sh")
-
-            print("waiting kunai to start")
-            if args.bpf_logs:
-                sbx.bg_ssh_cmd(
-                    "sudo cat /sys/kernel/debug/tracing/trace_pipe",
-                    stdout=os.path.join(args.output_dir, "tracepipe.stdout"),
-                    stderr=os.path.join(args.output_dir, "tracepipe.stderr"),
-                )
-            time.sleep(5)
-            # we delete kunai binary
-            sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
-
-        if args.test:
-            print("running test")
-            sbx.bg_ssh_cmd(
-                "uname -a",
-                stdout=os.path.join(args.output_dir, "test.stdout"),
-                stderr=os.path.join(args.output_dir, "test.stderr"),
-            )
-
-        if args.SAMPLE_COMMAND_LINE:
-            print("running sample")
-            str_sample_args = " ".join(sample_args)
-            sample_run_cmd = f"sudo -u {args.run_as} /tmp/sample.bin {str_sample_args}"
-            if args.strace:
-                sample_run_cmd = (
-                    f"sudo -u {args.run_as} strace -f /tmp/sample.bin {str_sample_args}"
-                )
-
-            sbx.bg_ssh_cmd(
-                sample_run_cmd,
-                stdout=SAMPLE_STDOUT,
-                stderr=SAMPLE_STDERR,
-            )
-
-        print("waiting analysis to finish: {}s".format(analysis_cfg["timeout"]))
-        for i in range(analysis_cfg["timeout"]):
-            print(".", end="" if i % 60 != 0 or i == 0 else "\n", flush=True)
-            time.sleep(1)
-        print()
-        print("analysis finished")
-        print("collecting files")
-
-        sbx.download_file(kunai_stdout, KUNAI_LOGS_PATH)
-        sbx.download_file(kunai_stderr, KUNAI_STDERR)
-
-        if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
-            print("downloading dropped files")
-            cache = set()
-            for e in events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH):
-                if e["info"]["event"]["name"] == "write_close":
-                    e_uuid = e["info"]["event"]["uuid"]
-                    dropped_file = e["data"]["path"]
-                    if dropped_file in cache:
-                        continue
-                    print(f"\ttrying to download: {dropped_file}")
-                    os.makedirs(DROPPED_FILES_DIR, exist_ok=True)
-                    try:
-                        # we update cache right now not to reprocess files failure
-                        cache.add(dropped_file)
-                        try:
-                            # some samples are using some LD_PRELOAD tricks so we prefer
-                            # using busybox (static) instead of std unix commands
-                            sbx.run_ssh_cmd(f"sudo busybox cp {dropped_file} /tmp/d")
-                        except subprocess.CalledProcessError as e:
-                            # trying to use regular cp but it might be failing
-                            sbx.run_ssh_cmd(f"sudo cp {dropped_file} /tmp/d")
-                        # we must change some rights if we don't want permission denied
-                        sbx.run_ssh_cmd("sudo chmod 777 /tmp/d")
-
-                        if sbx.sftp_client.stat("/tmp/d").st_size > 104_857_600:
-                            print("f\taborting file to big")
-                            continue
-
-                        local_dir = os.path.join(DROPPED_FILES_DIR, e_uuid)
-                        os.makedirs(local_dir)
-                        local_file = os.path.join(local_dir, "file.bin")
-                        sbx.download_file("/tmp/d", local_file)
-                        # removing empty file
-                        if os.path.getsize(local_file) == 0:
-                            print("\tremoving empty file")
-                            shutil.rmtree(local_dir)
-                            continue
-
-                        with open(
-                            os.path.join(DROPPED_FILES_DIR, e_uuid, "event.json"),
-                            "w",
-                            encoding="utf8",
-                        ) as fd:
-                            json.dump(e, fd, indent=2)
-
-                    except subprocess.CalledProcessError as e:
-                        # we remove all the SSH command line
-                        cmd = " ".join(e.cmd).replace(
-                            " ".join(sbx._prep_ssh_cmd("")), ""
-                        )
-                        print(f"failed to run {cmd}: {e.stderr}")
-                    except IOError as e:
-                        print(f"failed to fetch dropped file {dropped_file}: {e}")
-
+    if args.interactive:
+        # we need to be sure no other previous command took
+        # stdin otherwise we won't see what we type
+        subprocess.run(sbx._prep_ssh_cmd(""), check=False)
         sandbox_stop_no_fail(sbx)
-
-        print("processing pcap file")
-        if is_not_none_obj(tcpdump_cfg["filter"], str):
-            tmp_pcap_file = f"{sbx.pcap_file}.tmp"
-            subprocess.run(
-                [
-                    "tcpdump",
-                    "-r",
-                    sbx.pcap_file,
-                    "-w",
-                    tmp_pcap_file,
-                    tcpdump_cfg["filter"],
-                ],
-                check=True,
-            )
-            shutil.move(tmp_pcap_file, PCAP_PATH)
-        else:
-            shutil.move(sbx.pcap_file, PCAP_PATH)
-
-        print("dumping analysis metadata")
-        if META is not None:
-            with open(ANALYSIS_PATH, "w", encoding="utf8") as fd:
-                yaml.dump(META, fd)
-
-        if args.graph and args.output_dir is not None:
-            print("generating sample's activity graph")
-            graph = KunaiGraph()
-            graph.from_event_iterator(
-                events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
-            )
-            graph.to_svg(GRAPH_PATH)
-
-        if args.misp and args.output_dir is not None:
-            print("generating MISP event")
-            events = events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
-            kunai_misp_event = KunaiMispEvent(events)
-            kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
-            with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
-                fd.write(kunai_misp_event.into_misp_event().to_json())
-
-        if args.compress:
-            print("compressing kunai logs")
-            compress_file(KUNAI_LOGS_PATH)
-
-        print("cleaning up")
-        if os.path.isfile(sbx.pcap_file):
-            os.remove(sbx.pcap_file)
-
-        # remove temporary sandbox directory
         if tmp_sbx_dir is not None:
+            print(f"removing temporary sandbox: {tmp_sbx_dir}")
             shutil.rmtree(tmp_sbx_dir)
+        sys.exit(0)
 
-    except Exception as e:
-        # whatever happens we stop sandbox
-        sandbox_stop_no_fail(sbx)
-        raise e
+    META = None
+    SAMPLE_STDOUT = os.path.join(args.output_dir, "sample.stdout")
+    SAMPLE_STDERR = os.path.join(args.output_dir, "sample.stderr")
+    KUNAI_LOGS_PATH = os.path.join(args.output_dir, KUNAI_LOG_FILENAME)
+    KUNAI_STDERR = os.path.join(args.output_dir, "kunai.stderr")
+    PCAP_PATH = os.path.join(args.output_dir, "dump.pcap")
+    GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
+    MISP_EVENT_PATH = os.path.join(args.output_dir, "misp-event.json")
+    DROPPED_FILES_DIR = os.path.join(args.output_dir, "dropped")
+
+    # preparing sample
+    if args.SAMPLE_COMMAND_LINE:
+        sample_cmd = args.SAMPLE_COMMAND_LINE
+        print(f"want to run: {sample_cmd}")
+        print(f"uploading: {sample_cmd[0]}")
+        sbx.upload_file(sample_cmd[0], "/tmp/sample.bin")
+        print("making sample executable")
+        sbx.run_ssh_cmd("chmod +x /tmp/sample.bin")
+
+        sample_args = sample_cmd[1:] if len(sample_cmd) > 1 else []
+
+    # running kunai
+    if kunai_cfg["path"] is not None:
+        if not os.path.isfile(kunai_cfg["path"]):
+            raise (IOError("kunai is configured but binary is missing"))
+
+        print("uploading kunai binary")
+        kunai_tmp_dst = "/tmp/kunai"
+        kunai_dst = "/usr/bin/tcpdumb"
+        sbx.upload_file(kunai_cfg["path"], kunai_tmp_dst)
+        sbx.run_ssh_cmd(f"sudo mv {kunai_tmp_dst} {kunai_dst}")
+        sbx.run_ssh_cmd(f"sudo chmod +x {kunai_dst}")
+
+        # good time to dump metadata
+        sample_args = sample_args if not args.test else []
+        META = build_analysis_metadata(
+            sbx, kunai_dst, kunai_cfg["args"], sample_args, analysis_cfg["timeout"]
+        )
+
+        str_kunai_args = " ".join(kunai_cfg["args"])
+
+        # trick to prevent being encrypted by cryptolocker
+        # we store kunai output within /boot directory
+        kunai_stdout = "/boot/kunai.stdout.efi"
+        kunai_stderr = "/boot/kunai.stderr.efi"
+        full_kunai_cmd = (
+            f"sudo {kunai_dst} {str_kunai_args} 1> {kunai_stdout} 2> {kunai_stderr} &"
+        )
+
+        # some ransomware samples kill ongoing SSH connection so we
+        # better make a runner script to execute kunai and fetch
+        # the results later
+        with tempfile.NamedTemporaryFile(mode="w") as fd:
+            fd.write("#!/bin/bash\n")
+            fd.write(f"{full_kunai_cmd}")
+            fd.flush()
+            sbx.upload_file(fd.name, "/tmp/run.sh")
+            sbx.run_ssh_cmd("chmod +x /tmp/run.sh")
+
+        print(f"running kunai: {full_kunai_cmd}")
+        sbx.run_ssh_cmd("sudo /tmp/run.sh")
+
+        print("waiting kunai to start")
+        if args.bpf_logs:
+            sbx.bg_ssh_cmd(
+                "sudo cat /sys/kernel/debug/tracing/trace_pipe",
+                stdout=os.path.join(args.output_dir, "tracepipe.stdout"),
+                stderr=os.path.join(args.output_dir, "tracepipe.stderr"),
+            )
+        time.sleep(5)
+        # we delete kunai binary
+        sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
+
+    if args.test:
+        print("running test")
+        sbx.bg_ssh_cmd(
+            "uname -a",
+            stdout=os.path.join(args.output_dir, "test.stdout"),
+            stderr=os.path.join(args.output_dir, "test.stderr"),
+        )
+
+    if args.SAMPLE_COMMAND_LINE:
+        print("running sample")
+        str_sample_args = " ".join(sample_args)
+        sample_run_cmd = f"sudo -u {args.run_as} /tmp/sample.bin {str_sample_args}"
+        if args.strace:
+            sample_run_cmd = (
+                f"sudo -u {args.run_as} strace -f /tmp/sample.bin {str_sample_args}"
+            )
+
+        sbx.bg_ssh_cmd(
+            sample_run_cmd,
+            stdout=SAMPLE_STDOUT,
+            stderr=SAMPLE_STDERR,
+        )
+
+    print("waiting analysis to finish: {}s".format(analysis_cfg["timeout"]))
+    for i in range(analysis_cfg["timeout"]):
+        print(".", end="" if i % 60 != 0 or i == 0 else "\n", flush=True)
+        time.sleep(1)
+    print()
+    print("analysis finished")
+    print("collecting files")
+
+    sbx.download_file(kunai_stdout, KUNAI_LOGS_PATH)
+    sbx.download_file(kunai_stderr, KUNAI_STDERR)
+
+    if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
+        print("downloading dropped files")
+        cache = set()
+        for e in events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH):
+            if e["info"]["event"]["name"] == "write_close":
+                e_uuid = e["info"]["event"]["uuid"]
+                dropped_file = e["data"]["path"]
+                if dropped_file in cache:
+                    continue
+                print(f"\ttrying to download: {dropped_file}")
+                os.makedirs(DROPPED_FILES_DIR, exist_ok=True)
+                try:
+                    # we update cache right now not to reprocess files failure
+                    cache.add(dropped_file)
+                    try:
+                        # some samples are using some LD_PRELOAD tricks so we prefer
+                        # using busybox (static) instead of std unix commands
+                        sbx.run_ssh_cmd(f"sudo busybox cp {dropped_file} /tmp/d")
+                    except subprocess.CalledProcessError as e:
+                        # trying to use regular cp but it might be failing
+                        sbx.run_ssh_cmd(f"sudo cp {dropped_file} /tmp/d")
+                    # we must change some rights if we don't want permission denied
+                    sbx.run_ssh_cmd("sudo chmod 777 /tmp/d")
+
+                    if sbx.sftp_client.stat("/tmp/d").st_size > 104_857_600:
+                        print("f\taborting file to big")
+                        continue
+
+                    local_dir = os.path.join(DROPPED_FILES_DIR, e_uuid)
+                    os.makedirs(local_dir)
+                    local_file = os.path.join(local_dir, "file.bin")
+                    sbx.download_file("/tmp/d", local_file)
+                    # removing empty file
+                    if os.path.getsize(local_file) == 0:
+                        print("\tremoving empty file")
+                        shutil.rmtree(local_dir)
+                        continue
+
+                    with open(
+                        os.path.join(DROPPED_FILES_DIR, e_uuid, "event.json"),
+                        "w",
+                        encoding="utf8",
+                    ) as fd:
+                        json.dump(e, fd, indent=2)
+
+                except subprocess.CalledProcessError as e:
+                    # we remove all the SSH command line
+                    cmd = " ".join(e.cmd).replace(" ".join(sbx._prep_ssh_cmd("")), "")
+                    print(f"failed to run {cmd}: {e.stderr}")
+                except IOError as e:
+                    print(f"failed to fetch dropped file {dropped_file}: {e}")
+
+    sandbox_stop_no_fail(sbx)
+
+    print("processing pcap file")
+    if is_not_none_obj(tcpdump_cfg["filter"], str):
+        tmp_pcap_file = f"{sbx.pcap_file}.tmp"
+        subprocess.run(
+            [
+                "tcpdump",
+                "-r",
+                sbx.pcap_file,
+                "-w",
+                tmp_pcap_file,
+                tcpdump_cfg["filter"],
+            ],
+            check=True,
+        )
+        shutil.move(tmp_pcap_file, PCAP_PATH)
+    else:
+        shutil.move(sbx.pcap_file, PCAP_PATH)
+
+    print("dumping analysis metadata")
+    if META is not None:
+        with open(ANALYSIS_PATH, "w", encoding="utf8") as fd:
+            yaml.dump(META, fd)
+
+    if args.graph and args.output_dir is not None:
+        print("generating sample's activity graph")
+        graph = KunaiGraph()
+        graph.from_event_iterator(
+            events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
+        )
+        graph.to_svg(GRAPH_PATH)
+
+    if args.misp and args.output_dir is not None:
+        print("generating MISP event")
+        events = events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
+        kunai_misp_event = KunaiMispEvent(events)
+        kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
+        with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
+            fd.write(kunai_misp_event.into_misp_event().to_json())
+
+    if args.compress:
+        print("compressing kunai logs")
+        compress_file(KUNAI_LOGS_PATH)
+
+    print("cleaning up")
+    if os.path.isfile(sbx.pcap_file):
+        os.remove(sbx.pcap_file)
+
+    # remove temporary sandbox directory
+    if tmp_sbx_dir is not None:
+        shutil.rmtree(tmp_sbx_dir)
 
 
 if __name__ == "__main__":
