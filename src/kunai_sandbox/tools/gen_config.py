@@ -10,7 +10,48 @@ import sys
 import shlex
 
 
-def main():
+def gen_config(
+    qemu_cli: list[str],
+    snapshot: str,
+    run_dir: str,
+    distribution: str | None,
+    kernel: str | None,
+    arch: str | None,
+    username: str,
+    identity: str,
+    kunai_bin=None,
+    kunai_args=[],
+):
+    config = {}
+    config["uuid"] = str(uuid.uuid4())
+    # qemu configuration
+    config["qemu"] = {}
+    config["qemu"]["command"] = qemu_cli[0]
+    config["qemu"]["args"] = qemu_cli[1:]
+    config["qemu"]["snapshot"] = snapshot
+    config["qemu"]["run-dir"] = run_dir
+    config["qemu"]["distribution"] = (
+        "change_me" if distribution is None else distribution
+    )
+    config["qemu"]["kernel"] = "change_me" if kernel is None else kernel
+    config["qemu"]["arch"] = "change_me" if arch is None else arch
+
+    # ssh config
+    config["ssh"] = {"username": username, "identity": identity}
+
+    # analysis config (defaults)
+    config["analysis"] = {
+        "timeout": 60,
+        "kunai": {
+            "path": "change_me" if kunai_bin is None else kunai_bin,
+            "args": kunai_args,
+        },
+        "tcpdump": {"filter": "! (net 10.0.2.0/24 and port ssh)"},
+    }
+    return config
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("-a", "--arch", type=str, help="Architecture of the VM")
     parser.add_argument(
@@ -35,29 +76,17 @@ def main():
 
     # this is needed to process correctly -append in qemu CLI
     qemu_cli = shlex.split(" ".join(args.COMMAND_LINE))
-    config = {}
-    config["uuid"] = str(uuid.uuid4())
-    # qemu configuration
-    config["qemu"] = {}
-    config["qemu"]["command"] = qemu_cli[0]
-    config["qemu"]["args"] = qemu_cli[1:]
-    config["qemu"]["snapshot"] = args.snapshot
-    config["qemu"]["run-dir"] = args.run_dir
-    config["qemu"]["distribution"] = (
-        "change_me" if args.distribution is None else args.distribution
+
+    config = gen_config(
+        qemu_cli,
+        args.snapshot,
+        args.run_dir,
+        args.distribution,
+        args.kernel,
+        args.arch,
+        args.username,
+        args.identity,
     )
-    config["qemu"]["kernel"] = "change_me" if args.kernel is None else args.kernel
-    config["qemu"]["arch"] = "change_me" if args.arch is None else args.arch
-
-    # ssh config
-    config["ssh"] = {"username": args.username, "identity": args.identity}
-
-    # analysis config (defaults)
-    config["analysis"] = {
-        "timeout": 60,
-        "kunai": {"path": "change_me", "args": []},
-        "tcpdump": {"filter": "! (net 10.0.2.0/24 and port ssh)"},
-    }
 
     yaml.dump(config, sys.stdout, sort_keys=False)
 
