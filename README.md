@@ -20,6 +20,8 @@ uv tool install https://github.com/kunai-project/sandbox.git
 
 # testing
 kunai-sandbox -h
+# tool to prepare sandboxes
+ks-sandbox-init -h
 # tool used to generate sandbox config
 ks-gen-config -h
 ```
@@ -32,6 +34,8 @@ pipx install git+https://github.com/kunai-project/sandbox.git
 
 # testing
 kunai-sandbox -h
+# tool to prepare sandboxes
+ks-sandbox-init -h
 # tool used to generate sandbox config
 ks-gen-config -h
 ```
@@ -52,7 +56,7 @@ the virtual environment** you have created.
 ### 2. initializing the sandbox 
 
 ```bash
-./scripts/sandbox-init.sh /path/to/qcow/image /path/to/prepared/sandbox
+ks-sandbox-init /path/to/qcow/image /path/to/prepared/sandbox
 ```
 
 This initialization takes more or less time depending if you are relying on full system emulation or if you benefit from KVM acceleration.
