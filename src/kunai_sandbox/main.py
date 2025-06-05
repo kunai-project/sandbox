@@ -471,13 +471,25 @@ def main(argv=None):
 
     # we start the sandbox
     if args.fix_vm:
+        print("booting sandbox without snapshot")
         # load VM without snapshot
         sbx.start(loadvm=False)
         # we wait a little time that the sandbox starts
-        time.sleep(20)
+        start = datetime.now()
         snapshot = sbx.qemu_config["snapshot"]
+        print("waiting the sandbox to be ready for snapshot")
         # we wait sandbox is ready
-        sbx.run_ssh_cmd("uptime")
+        while True:
+            try:
+                sbx.run_ssh_cmd("uptime")
+                break
+            except Exception:
+                print(
+                    f"sandbox hasn't booted yet, time elapsed: {datetime.now() - start}"
+                )
+                time.sleep(5)
+
+        print("creating snapshot")
         sbx.run_qemu_console_command(f"delvm {snapshot}")
         sbx.run_qemu_console_command(f"savevm {snapshot}")
         sbx.stop()
