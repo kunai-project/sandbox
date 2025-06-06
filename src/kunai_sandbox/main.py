@@ -320,10 +320,11 @@ def sha256_file(file_path):
     return sha256.hexdigest()
 
 
-def events_generator(sample_upload_path: str, kunai_log_file: str):
+def events_generator(sample_hash: str, sample_upload_path: str, kunai_log_file: str):
     with open(kunai_log_file, "r", encoding="utf8") as fd:
         q = Query(True)
         q.add_exe_path_hit_once([sample_upload_path])
+        q.add_hashes([sample_hash])
         for line in fd.readlines():
             event = Event(JqDict(json.loads(line)))
             if q.match(event):
@@ -579,6 +580,7 @@ def main(argv=None):
     MISP_EVENT_PATH = os.path.join(args.output_dir, "misp-event.json")
     DROPPED_FILES_DIR = os.path.join(args.output_dir, "dropped")
     SAMPLE_UPLOAD_PATH = "/tmp/sample.bin"
+    SAMPLE_HASH = sha256_file(args.SAMPLE_COMMAND_LINE[0])
 
     # preparing sample
     if args.SAMPLE_COMMAND_LINE:
@@ -678,7 +680,7 @@ def main(argv=None):
     if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
         print("downloading dropped files")
         cache = set()
-        for e in events_generator(SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH):
+        for e in events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH):
             if e["info"]["event"]["name"] == "write_close":
                 e_uuid = e["info"]["event"]["uuid"]
                 dropped_file = e["data"]["path"]
@@ -755,12 +757,14 @@ def main(argv=None):
     if args.graph and args.output_dir is not None:
         print("generating sample's activity graph")
         graph = KunaiGraph()
-        graph.from_event_iterator(events_generator(SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH))
+        graph.from_event_iterator(
+            events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
+        )
         graph.to_svg(GRAPH_PATH)
 
     if args.misp and args.output_dir is not None:
         print("generating MISP event")
-        events = events_generator(SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
+        events = events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
         kunai_misp_event = KunaiMispEvent(events)
         kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
         with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
