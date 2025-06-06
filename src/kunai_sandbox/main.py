@@ -320,10 +320,10 @@ def sha256_file(file_path):
     return sha256.hexdigest()
 
 
-def events_generator(sample, kunai_log_file):
+def events_generator(sample_upload_path: str, kunai_log_file: str):
     with open(kunai_log_file, "r", encoding="utf8") as fd:
         q = Query(True)
-        q.add_hashes([sha256_file(sample)])
+        q.add_exe_path_hit_once(sample_upload_path)
         for line in fd.readlines():
             event = Event(JqDict(json.loads(line)))
             if q.match(event):
@@ -578,15 +578,16 @@ def main(argv=None):
     GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
     MISP_EVENT_PATH = os.path.join(args.output_dir, "misp-event.json")
     DROPPED_FILES_DIR = os.path.join(args.output_dir, "dropped")
+    SAMPLE_UPLOAD_PATH = "/tmp/sample.bin"
 
     # preparing sample
     if args.SAMPLE_COMMAND_LINE:
         sample_cmd = args.SAMPLE_COMMAND_LINE
         print(f"want to run: {sample_cmd}")
         print(f"uploading: {sample_cmd[0]}")
-        sbx.upload_file(sample_cmd[0], "/tmp/sample.bin")
+        sbx.upload_file(sample_cmd[0], SAMPLE_UPLOAD_PATH)
         print("making sample executable")
-        sbx.run_ssh_cmd("chmod +x /tmp/sample.bin")
+        sbx.run_ssh_cmd(f"chmod +x {SAMPLE_UPLOAD_PATH}")
 
         sample_args = sample_cmd[1:] if len(sample_cmd) > 1 else []
 
@@ -653,11 +654,9 @@ def main(argv=None):
     if args.SAMPLE_COMMAND_LINE:
         print("running sample")
         str_sample_args = " ".join(sample_args)
-        sample_run_cmd = f"sudo -u {args.run_as} /tmp/sample.bin {str_sample_args}"
+        sample_run_cmd = f"sudo -u {args.run_as} {SAMPLE_UPLOAD_PATH} {str_sample_args}"
         if args.strace:
-            sample_run_cmd = (
-                f"sudo -u {args.run_as} strace -f /tmp/sample.bin {str_sample_args}"
-            )
+            sample_run_cmd = f"sudo -u {args.run_as} strace -f {SAMPLE_UPLOAD_PATH} {str_sample_args}"
 
         sbx.bg_ssh_cmd(
             sample_run_cmd,
@@ -679,7 +678,7 @@ def main(argv=None):
     if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
         print("downloading dropped files")
         cache = set()
-        for e in events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH):
+        for e in events_generator(SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH):
             if e["info"]["event"]["name"] == "write_close":
                 e_uuid = e["info"]["event"]["uuid"]
                 dropped_file = e["data"]["path"]
@@ -756,14 +755,12 @@ def main(argv=None):
     if args.graph and args.output_dir is not None:
         print("generating sample's activity graph")
         graph = KunaiGraph()
-        graph.from_event_iterator(
-            events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
-        )
+        graph.from_event_iterator(events_generator(SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH))
         graph.to_svg(GRAPH_PATH)
 
     if args.misp and args.output_dir is not None:
         print("generating MISP event")
-        events = events_generator(args.SAMPLE_COMMAND_LINE[0], KUNAI_LOGS_PATH)
+        events = events_generator(SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
         kunai_misp_event = KunaiMispEvent(events)
         kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
         with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
