@@ -323,7 +323,7 @@ def sha256_file(file_path):
 def events_generator(sample_upload_path: str, kunai_log_file: str):
     with open(kunai_log_file, "r", encoding="utf8") as fd:
         q = Query(True)
-        q.add_exe_path_hit_once(sample_upload_path)
+        q.add_exe_path_hit_once([sample_upload_path])
         for line in fd.readlines():
             event = Event(JqDict(json.loads(line)))
             if q.match(event):
