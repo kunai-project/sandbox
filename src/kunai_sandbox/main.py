@@ -339,7 +339,7 @@ def random_task_name():
         "dmcrypt_write",
         "hwrng",
         "idle_inject",
-        "iprt-",
+        "iprt",
         "jbd2",
         "kauditd",
         "kcompactd0",
@@ -641,7 +641,24 @@ def main(argv=None):
                 stdout=os.path.join(args.output_dir, "tracepipe.stdout"),
                 stderr=os.path.join(args.output_dir, "tracepipe.stderr"),
             )
-        time.sleep(5)
+
+        sleep_time = 0
+        while True:
+            # we try to grep for the start of a kunai event object meaning kunai started
+            c = sbx.run_ssh_cmd(
+                f"/usr/bin/grep -E '\"data\":' {kunai_stdout}", check=False
+            )
+            # we found a hit
+            if c.returncode == 0:
+                break
+            if sleep_time > 30:
+                print(f"last check command stderr: {c.stderr}")
+                raise Exception("kunai took too long to start")
+            time.sleep(1)
+            sleep_time += 1
+
+        print(f"kunai started in {sleep_time}s")
+
         # we delete kunai binary
         sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
 
