@@ -148,7 +148,7 @@ wheels = [
 
 [[package]]
 name = "kunai-sandbox"
-version = "0.1.5"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "paramiko" },
@@ -160,7 +160,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "paramiko", specifier = ">=3.5.0" },
-    { name = "pykunai", specifier = ">=0.1.7" },
+    { name = "pykunai", specifier = ">=0.1.8" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qemu-qmp", specifier = ">=0.0.3" },
 ]
@@ -199,16 +199,16 @@ wheels = [
 
 [[package]]
 name = "pykunai"
-version = "0.1.7"
+version = "0.1.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphviz" },
     { name = "pymisp" },
     { name = "toml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9a/95/f9f4c0fe85cc655ecdcdcd69b688278362cce74ef3e766ee8bbaa1e2c0e6/pykunai-0.1.7.tar.gz", hash = "sha256:e092cb180b82ffc4b263a3ba64fe41f542410ffba14e63d5a8533805bf65b05a", size = 62118, upload-time = "2025-06-06T08:52:17.48Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/0c/23215e23f531296268829f82857db47526f681bfe39d7491efab316d8fe6/pykunai-0.1.8.tar.gz", hash = "sha256:f5a1c22852f1ce3a4235d9649eea6ec3ee2bb26cfc0dbd476527ef0f1ada890f", size = 62120, upload-time = "2025-06-06T15:50:33.207Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/26/629d5b5aaa1d1c1bdfe5fd185d20343b721cdb297d612ec89104e639cdea/pykunai-0.1.7-py3-none-any.whl", hash = "sha256:69941875d46f63ada0b00d4117cfe34367859e8bf99e9a8898c95a3b18bc61b1", size = 32300, upload-time = "2025-06-06T08:52:15.899Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/bc/2fdc69775b036e6dc49044dbdaacdadba31a7a7720650bcf47a8ee3db505/pykunai-0.1.8-py3-none-any.whl", hash = "sha256:4d7b6ada49eca82cd8ba37e0e8c170bf40e47c667817d854aea64b4c0edeb2aa", size = 32297, upload-time = "2025-06-06T15:50:31.927Z" },
 ]
 
 [[package]]
