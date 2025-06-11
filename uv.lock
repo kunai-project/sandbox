@@ -148,7 +148,7 @@ wheels = [
 
 [[package]]
 name = "kunai-sandbox"
-version = "0.1.8"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "paramiko" },
