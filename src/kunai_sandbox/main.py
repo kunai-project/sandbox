@@ -378,7 +378,10 @@ def main(argv=None):
     ANALYSIS_FILENAME = "analysis.yaml"
     KUNAI_LOG_FILENAME = "kunai.jsonl"
 
-    parser = argparse.ArgumentParser(description="Sandbox runner script")
+    parser = argparse.ArgumentParser(
+        description="Sandbox runner script",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--copy",
         type=str,
@@ -404,6 +407,12 @@ def main(argv=None):
         "--tmp",
         action="store_true",
         help="Duplicates sandbox directory into a temporary directory prior running it",
+    )
+    parser.add_argument(
+        "--tmp-suffix",
+        type=str,
+        default="",
+        help="Suffix to put at the end of temporary files/directory",
     )
     parser.add_argument("-t", "--timeout", type=int, help="Analysis timeout in seconds")
     parser.add_argument("-f", "--force", action="store_true", help="Force analysis")
@@ -460,12 +469,15 @@ def main(argv=None):
 
     tmp_sbx_dir = None
     if args.tmp:
-        tmp_sbx_dir = tempfile.mkdtemp(prefix="kunai-sandbox-")
+        suffix = f"-{args.tmp_suffix.lstrip('-')}" if args.tmp_suffix != "" else ""
+        tmp_sbx_dir = tempfile.TemporaryDirectory(
+            prefix="kunai-sandbox-", suffix=f"{suffix}"
+        )
         cfg_base = os.path.basename(args.config)
         sbx_dir = os.path.dirname(args.config)
-        print(f"creating a temporary sandbox in: {tmp_sbx_dir}")
-        shutil.copytree(sbx_dir, tmp_sbx_dir, dirs_exist_ok=True)
-        args.config = os.path.join(tmp_sbx_dir, cfg_base)
+        print(f"creating a temporary sandbox in: {tmp_sbx_dir.name}")
+        shutil.copytree(sbx_dir, tmp_sbx_dir.name, dirs_exist_ok=True)
+        args.config = os.path.join(tmp_sbx_dir.name, cfg_base)
 
     # reading config
     with open(args.config, encoding="utf8") as fd:
@@ -572,9 +584,6 @@ def main(argv=None):
         # stdin otherwise we won't see what we type
         subprocess.run(sbx._prep_ssh_cmd(""), check=False)
         sandbox_stop_no_fail(sbx)
-        if tmp_sbx_dir is not None:
-            print(f"removing temporary sandbox: {tmp_sbx_dir}")
-            shutil.rmtree(tmp_sbx_dir)
         sys.exit(0)
 
     META = None
@@ -802,10 +811,6 @@ def main(argv=None):
     print("cleaning up")
     if os.path.isfile(sbx.pcap_file):
         os.remove(sbx.pcap_file)
-
-    # remove temporary sandbox directory
-    if tmp_sbx_dir is not None:
-        shutil.rmtree(tmp_sbx_dir)
 
 
 if __name__ == "__main__":
