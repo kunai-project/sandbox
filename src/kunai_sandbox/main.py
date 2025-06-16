@@ -252,7 +252,10 @@ class Sandbox:
         for p in self._bg_subproc:
             if p.returncode is None:
                 p.terminate()
-        self.run_qmp_command("quit")
+        try:
+            self.run_qmp_command("quit")
+        except Exception:
+            self._qemu_process.kill()
 
     def __del__(self):
         try:
