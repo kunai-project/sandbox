@@ -167,7 +167,32 @@ class Sandbox:
         self.sftp_client.put(local, remote)
 
     def download_file(self, remote: str, local: str):
-        self.sftp_client.get(remote, local)
+        """
+        This function implement file downloading from SFTP
+        server but with file_size limit. If there is no
+        file limit and the remote file keeps being written
+        at a higher pace than the read, stfp.get never ends.
+        """
+
+        # Get file attributes to determine file size
+        file_attr = self.sftp_client.stat(remote)
+        file_size = file_attr.st_size
+
+        # Open the remote file and the local file
+        with (
+            self.sftp_client.open(remote, "r") as remote_file,
+            open(local, "wb") as local_file,
+        ):
+            bytes_read = 0
+            # Read and write the file in chunks
+            while bytes_read < file_size:
+                remaining_bytes = file_size - bytes_read
+                chunk_size = min(4096, remaining_bytes)
+                chunk = remote_file.read(chunk_size)
+                if not chunk:  # End of file
+                    break
+                local_file.write(chunk)
+                bytes_read += len(chunk)
 
     def start(self, loadvm=True):
         stdout = self._qemu_rundir_file("qemu.stdout")
