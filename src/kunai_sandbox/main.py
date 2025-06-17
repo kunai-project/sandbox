@@ -187,7 +187,7 @@ class Sandbox:
             # Read and write the file in chunks
             while bytes_read < file_size:
                 remaining_bytes = file_size - bytes_read
-                chunk_size = min(4096, remaining_bytes)
+                chunk_size = min((1 << 20) * 4, remaining_bytes)
                 chunk = remote_file.read(chunk_size)
                 if not chunk:  # End of file
                     break
@@ -348,10 +348,10 @@ def sha256_file(file_path):
     return sha256.hexdigest()
 
 
-def events_generator(
+def gunzip_events_generator(
     sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str
 ):
-    with open(kunai_log_file, "r", encoding="utf8") as fd:
+    with gzip.open(kunai_log_file, "r") as fd:
         q = Query(True)
         if sample_upload_path is not None:
             q.add_exe_path_hit_once([sample_upload_path])
@@ -399,9 +399,6 @@ def random_task_name():
 def main(argv=None):
     if argv is not None:
         sys.argv = [sys.argv[0]] + argv
-
-    ANALYSIS_FILENAME = "analysis.yaml"
-    KUNAI_LOG_FILENAME = "kunai.jsonl"
 
     parser = argparse.ArgumentParser(
         description="Sandbox runner script",
@@ -481,6 +478,7 @@ def main(argv=None):
 
     args = parser.parse_args()
 
+    ANALYSIS_FILENAME = "analysis.yaml"
     ANALYSIS_PATH = None
     if args.output_dir is not None:
         ANALYSIS_PATH = os.path.join(args.output_dir, ANALYSIS_FILENAME)
@@ -614,7 +612,7 @@ def main(argv=None):
     META = None
     SAMPLE_STDOUT = os.path.join(args.output_dir, "sample.stdout")
     SAMPLE_STDERR = os.path.join(args.output_dir, "sample.stderr")
-    KUNAI_LOGS_PATH = os.path.join(args.output_dir, KUNAI_LOG_FILENAME)
+    KUNAI_LOGS_PATH = os.path.join(args.output_dir, "kunai.jsonl.gz")
     KUNAI_STDERR = os.path.join(args.output_dir, "kunai.stderr")
     PCAP_PATH = os.path.join(args.output_dir, "dump.pcap")
     GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
@@ -673,10 +671,7 @@ def main(argv=None):
             sbx.upload_file(fd.name, "/tmp/run.sh")
             sbx.run_ssh_cmd("chmod +x /tmp/run.sh")
 
-        print(f"running kunai: {full_kunai_cmd}")
-        sbx.run_ssh_cmd("sudo /tmp/run.sh")
-
-        print("waiting kunai to start")
+        # reading bpf trace pipe
         if args.bpf_logs:
             sbx.bg_ssh_cmd(
                 "sudo cat /sys/kernel/debug/tracing/trace_pipe",
@@ -684,6 +679,10 @@ def main(argv=None):
                 stderr=os.path.join(args.output_dir, "tracepipe.stderr"),
             )
 
+        print(f"running kunai: {full_kunai_cmd}", flush=True)
+        sbx.run_ssh_cmd("sudo /tmp/run.sh", capture_output=False)
+
+        print("waiting kunai to start", flush=True)
         sleep_time = 0
         while True:
             # we try to grep for the start of a kunai event object meaning kunai started
@@ -701,8 +700,9 @@ def main(argv=None):
 
         print(f"kunai started in {sleep_time}s")
 
-        # we delete kunai binary
+        # we delete kunai binary and runner script
         sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
+        sbx.run_ssh_cmd("sudo rm /tmp/run.sh")
 
     if args.test:
         print("running test")
@@ -730,16 +730,21 @@ def main(argv=None):
         print(".", end="" if i % 60 != 0 or i == 0 else "\n", flush=True)
         time.sleep(1)
     print()
-    print("analysis finished")
-    print("collecting files")
+    print("analysis finished", flush=True)
+    print("collecting files", flush=True)
 
-    sbx.download_file(kunai_stdout, KUNAI_LOGS_PATH)
+    # we compress output
+    sbx.run_ssh_cmd(f"sudo gzip {kunai_stdout}")
+
+    sbx.download_file(f"{kunai_stdout}.gz", KUNAI_LOGS_PATH)
     sbx.download_file(kunai_stderr, KUNAI_STDERR)
 
     if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
         print("downloading dropped files")
         cache = set()
-        for e in events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH):
+        for e in gunzip_events_generator(
+            SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH
+        ):
             if e["info"]["event"]["name"] == "write_close":
                 e_uuid = e["info"]["event"]["uuid"]
                 dropped_file = e["data"]["path"]
@@ -790,7 +795,7 @@ def main(argv=None):
 
     sandbox_stop_no_fail(sbx)
 
-    print("processing pcap file")
+    print("processing pcap file", flush=True)
     if is_not_none_obj(tcpdump_cfg["filter"], str):
         tmp_pcap_file = f"{sbx.pcap_file}.tmp"
         subprocess.run(
@@ -808,32 +813,30 @@ def main(argv=None):
     else:
         shutil.move(sbx.pcap_file, PCAP_PATH)
 
-    print("dumping analysis metadata")
+    print("dumping analysis metadata", flush=True)
     if META is not None:
         with open(ANALYSIS_PATH, "w", encoding="utf8") as fd:
             yaml.dump(META, fd)
 
     if args.graph and args.output_dir is not None:
-        print("generating sample's activity graph")
+        print("generating sample's activity graph", flush=True)
         graph = KunaiGraph()
         graph.from_event_iterator(
-            events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
+            gunzip_events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
         )
         graph.to_svg(GRAPH_PATH)
 
     if args.misp and args.output_dir is not None:
-        print("generating MISP event")
-        events = events_generator(SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH)
+        print("generating MISP event", flush=True)
+        events = gunzip_events_generator(
+            SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH
+        )
         kunai_misp_event = KunaiMispEvent(events)
         kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
         with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
             fd.write(kunai_misp_event.into_misp_event().to_json())
 
-    if args.compress:
-        print("compressing kunai logs")
-        compress_file(KUNAI_LOGS_PATH)
-
-    print("cleaning up")
+    print("cleaning up", flush=True)
     if os.path.isfile(sbx.pcap_file):
         os.remove(sbx.pcap_file)
 
