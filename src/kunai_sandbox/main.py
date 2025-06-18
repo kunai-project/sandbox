@@ -14,6 +14,7 @@ import tempfile
 import json
 import hashlib
 import weakref
+import signal
 
 from pykunai.graph import KunaiGraph
 from pykunai.event import Query, Event, JqDict
@@ -395,8 +396,20 @@ def random_task_name():
     return random.choice(kthreads_names)
 
 
+class SigtermException(Exception):
+    pass
+
+
 # one can provide argv so that main can be called programatically
 def main(argv=None):
+    # Function to handle the SIGTERM signal
+    def sigterm_handler(signum, frame):
+        print("Received SIGTERM. Raising exception...")
+        raise SigtermException
+
+    # Set up the signal handler for SIGTERM
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     if argv is not None:
         sys.argv = [sys.argv[0]] + argv
 
