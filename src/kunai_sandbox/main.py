@@ -1,26 +1,31 @@
-import time
 import argparse
-import yaml
-import os
-import gzip
 import asyncio
-import subprocess
-import paramiko
+import atexit
+import gzip
+import hashlib
+import json
+import os
 import random
 import shlex
-import sys
 import shutil
-import tempfile
-import json
-import hashlib
-import weakref
 import signal
+import subprocess
+import sys
+import tempfile
+import time
+import weakref
+from datetime import datetime, timezone
 
+import paramiko
+import yaml
+from pykunai.event import Event, JqDict, Query
 from pykunai.graph import KunaiGraph
-from pykunai.event import Query, Event, JqDict
 from pykunai.misp.export import KunaiMispEvent
 from qemu.qmp import QMPClient
-from datetime import datetime, timezone
+
+
+class SandboxException(Exception):
+    pass
 
 
 class Sandbox:
@@ -73,7 +78,7 @@ class Sandbox:
     def _qmp_sock(self):
         return self._qemu_rundir_file("qmp.sock")
 
-    def _qemu_command(self, loadvm=True):
+    def _qemu_command(self, loadvm=True) -> list[str]:
         _args = list(self.qemu_config["args"])
 
         for i, arg in enumerate(_args):
@@ -196,15 +201,17 @@ class Sandbox:
                 bytes_read += len(chunk)
 
     def start(self, loadvm=True):
-        stdout = self._qemu_rundir_file("qemu.stdout")
-        stderr = self._qemu_rundir_file("qemu.stderr")
+        stdout_path = self._qemu_rundir_file("qemu.stdout")
+        stderr_path = self._qemu_rundir_file("qemu.stderr")
+        pid_path = self._qemu_rundir_file("qemu.pid")
 
         qemu_cmd = self._qemu_command(loadvm)
         print(" ".join(shlex.quote(arg) for arg in qemu_cmd))
 
         with (
-            open(stdout, "w", encoding="utf8") as out_file,
-            open(stderr, "w", encoding="utf8") as err_file,
+            open(stdout_path, "w", encoding="utf8") as out_file,
+            open(stderr_path, "w", encoding="utf8") as err_file,
+            open(pid_path, "w", encoding="utf8") as pid_file,
         ):
             self._qemu_process = subprocess.Popen(
                 qemu_cmd,
@@ -213,6 +220,8 @@ class Sandbox:
                 stderr=err_file,
                 cwd=self._qemu_run_dir,
             )
+            
+            pid_file.write(str(self._qemu_process.pid))
 
         # we wait a bit to make sure qemu runs
         time.sleep(1)
@@ -220,8 +229,11 @@ class Sandbox:
         # qemu command should not fail
         rc = self._qemu_process.poll()
         if rc is not None:
-            raise subprocess.CalledProcessError(
-                rc, self._qemu_command, f"qemu command failed, inspect {stderr}"
+            stderr = None
+            with open(stderr_path, "r", encoding="utf8") as err_fd:
+                stderr = err_fd.read()
+            raise SandboxException(
+                f"Qemu Command: {qemu_cmd} return_code={rc}\nstderr={stderr}"
             )
 
     def dump_utils(self):
@@ -261,8 +273,11 @@ class Sandbox:
         return self.run_qmp_command("human-monitor-command", {"command-line": command})
 
     def run_qmp_command(self, command, arguments=None):
+        if self._qemu_process is None:
+            return
+
         if self._qemu_process.poll() is not None:
-            raise Exception("qemu command stopped unexpectedely")
+            raise SandboxException("qemu command stopped unexpectedely")
 
         async def _run_qemu_cmd(cmd, arguments=None):
             qmp = QMPClient("Kunai Sandbox Client")
@@ -281,7 +296,8 @@ class Sandbox:
         try:
             self.run_qmp_command("quit")
         except Exception:
-            self._qemu_process.kill()
+            if self._qemu_process is not None:
+                self._qemu_process.kill()
 
     def __del__(self):
         try:
@@ -290,7 +306,7 @@ class Sandbox:
             pass
 
 
-def sandbox_stop_no_fail(sbx):
+def sandbox_stop_no_fail(sbx: Sandbox):
     try:
         sbx.stop()
     except Exception:
@@ -497,9 +513,12 @@ def main(argv=None):
         ANALYSIS_PATH = os.path.join(args.output_dir, ANALYSIS_FILENAME)
 
     if args.output_dir is not None and not args.force:
-        if os.path.isfile(ANALYSIS_PATH):
-            print("File has already been analyzed, use -f|--force to analyze it again")
-            sys.exit(1)
+        if ANALYSIS_PATH is not None:
+            if os.path.isfile(ANALYSIS_PATH):
+                print(
+                    "File has already been analyzed, use -f|--force to analyze it again"
+                )
+                sys.exit(1)
     elif args.output_dir is not None and args.force and os.path.isdir(args.output_dir):
         shutil.rmtree(args.output_dir)
 
@@ -567,6 +586,9 @@ def main(argv=None):
         )
 
     sbx.start()
+
+    # register exit handler for proper cleanup
+    atexit.register(sandbox_stop_no_fail, sbx)
 
     # we dump some utility scripts to easily connect to sandbox
     for u in sbx.dump_utils():
@@ -828,8 +850,9 @@ def main(argv=None):
 
     print("dumping analysis metadata", flush=True)
     if META is not None:
-        with open(ANALYSIS_PATH, "w", encoding="utf8") as fd:
-            yaml.dump(META, fd)
+        if ANALYSIS_PATH is not None:
+            with open(ANALYSIS_PATH, "w", encoding="utf8") as fd:
+                yaml.dump(META, fd)
 
     if args.graph and args.output_dir is not None:
         print("generating sample's activity graph", flush=True)
