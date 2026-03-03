@@ -34,7 +34,7 @@ class Sandbox:
         self._qemu_process = None
         _, self._pcap_file = tempfile.mkstemp(prefix="kunai-sandbox-", suffix=".pcap")
         self._ssh_port = random.randint(1025, 65535)
-        self._bg_subproc = []
+        self._bg_subproc: list[subprocess.Popen[bytes]] = []
         self.__scp_client = None
         # this is set by main
         self._config_dir = os.path.dirname(sandbox_cfg["path"])
@@ -220,7 +220,7 @@ class Sandbox:
                 stderr=err_file,
                 cwd=self._qemu_run_dir,
             )
-            
+
             pid_file.write(str(self._qemu_process.pid))
 
         # we wait a bit to make sure qemu runs
@@ -309,8 +309,18 @@ class Sandbox:
 def sandbox_stop_no_fail(sbx: Sandbox):
     try:
         sbx.stop()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"failed at stopping sandbox: {e}", file=sys.stderr)
+
+
+def cleanup_sandbox_no_fail(sbx: Sandbox):
+    sandbox_stop_no_fail(sbx)
+
+    try:
+        if os.path.isfile(sbx.pcap_file):
+            os.remove(sbx.pcap_file)
+    except Exception as e:
+        print(f"failed at removing pcap: {e}", file=sys.stderr)
 
 
 def compress_file(file_path):
@@ -412,16 +422,16 @@ def random_task_name():
     return random.choice(kthreads_names)
 
 
-class SigtermException(Exception):
-    pass
-
-
 # one can provide argv so that main can be called programatically
 def main(argv=None):
     # Function to handle the SIGTERM signal
     def sigterm_handler(signum, frame):
-        print("Received SIGTERM. Raising exception...")
-        raise SigtermException
+        print(
+            "Received SIGTERM. Exiting program gently to cleanup resources",
+            file=sys.stderr,
+        )
+        # to run stuff registered by atexit
+        exit(1)
 
     # Set up the signal handler for SIGTERM
     signal.signal(signal.SIGTERM, sigterm_handler)
@@ -533,6 +543,8 @@ def main(argv=None):
         print(f"creating a temporary sandbox in: {tmp_sbx_dir.name}")
         shutil.copytree(sbx_dir, tmp_sbx_dir.name, dirs_exist_ok=True)
         args.config = os.path.join(tmp_sbx_dir.name, cfg_base)
+        # force cleaning up tmp at exit
+        atexit.register(tmp_sbx_dir.cleanup)
 
     # reading config
     with open(args.config, encoding="utf8") as fd:
@@ -588,7 +600,7 @@ def main(argv=None):
     sbx.start()
 
     # register exit handler for proper cleanup
-    atexit.register(sandbox_stop_no_fail, sbx)
+    atexit.register(cleanup_sandbox_no_fail, sbx)
 
     # we dump some utility scripts to easily connect to sandbox
     for u in sbx.dump_utils():
