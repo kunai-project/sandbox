@@ -34,6 +34,9 @@ class Sandbox:
         self._qemu_process = None
         _, self._pcap_file = tempfile.mkstemp(prefix="kunai-sandbox-", suffix=".pcap")
         self._ssh_port = random.randint(1025, 65535)
+        # guest-side port of the mgmt sshd, set once spawn_mgmt_sshd()
+        # succeeds; used to strip its traffic out of the recorded pcap
+        self._mgmt_ssh_guest_port = None
         self._bg_subproc: list[subprocess.Popen[bytes]] = []
         self.__scp_client = None
         # this is set by main
@@ -47,6 +50,10 @@ class Sandbox:
     @property
     def pcap_file(self) -> str:
         return self._pcap_file
+
+    @property
+    def mgmt_ssh_guest_port(self) -> int | None:
+        return self._mgmt_ssh_guest_port
 
     @property
     def qemu_config(self) -> dict:
@@ -269,6 +276,58 @@ class Sandbox:
 
         return [ssh_util, cp_to, cp_from]
 
+    def spawn_mgmt_sshd(self, sshd_bin="/usr/sbin/sshd", timeout=15) -> bool:
+        """
+        Spawns a second sshd in the guest, disguised as a kernel worker
+        thread and reachable on a runtime-chosen port added via QMP
+        hostfwd_add. This gives us a control channel independent from the
+        sshd on port 22, which samples can (and do) kill outright. On any
+        failure this leaves self._ssh_port untouched, i.e. falls back to
+        the port 22 channel used so far.
+        """
+        disguised_name = random_mgmt_sshd_name()
+        disguised_path = f"/usr/sbin/{disguised_name}"
+        guest_port = random.randint(1025, 65535)
+        host_port = random.randint(1025, 65535)
+
+        try:
+            self.run_ssh_cmd(f"sudo cp {sshd_bin} {disguised_path}")
+            self.run_ssh_cmd(
+                f"sudo {disguised_path} -p {guest_port} -o PidFile=/run/{disguised_name}.pid"
+            )
+            self.run_qemu_console_command(
+                f"hostfwd_add net0 tcp::{host_port}-:{guest_port}"
+            )
+        except Exception as e:
+            print(
+                f"failed to bootstrap mgmt sshd, falling back to port 22: {e}",
+                file=sys.stderr,
+            )
+            return False
+
+        # verify the new channel actually works before switching over to it
+        previous_port = self._ssh_port
+        self._ssh_port = host_port
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                self.run_ssh_cmd("true")
+                print(
+                    f"mgmt sshd ready on host port {host_port} "
+                    f"(guest port {guest_port}, disguised as '{disguised_name}')"
+                )
+                self._mgmt_ssh_guest_port = guest_port
+                return True
+            except subprocess.CalledProcessError:
+                time.sleep(1)
+
+        print(
+            "mgmt sshd did not come up in time, falling back to port 22",
+            file=sys.stderr,
+        )
+        self._ssh_port = previous_port
+        return False
+
     def run_qemu_console_command(self, command: str):
         return self.run_qmp_command("human-monitor-command", {"command-line": command})
 
@@ -417,6 +476,33 @@ def random_task_name():
         "psimon",
         "rcub",
         "watchdogd",
+    ]
+
+    return random.choice(kthreads_names)
+
+
+def random_mgmt_sshd_name():
+    # separate pool from random_task_name() so the mgmt sshd and the
+    # relocated kunai binary never end up disguised under the same name
+    # in a given run
+    kthreads_names = [
+        "acpi_thermal_pm",
+        "ata_sff",
+        "blkcg_punt_bio",
+        "cfg80211",
+        "charger_manager",
+        "devfreq_wq",
+        "edac-poller",
+        "inet_frag_wq",
+        "kblockd",
+        "kintegrityd",
+        "kstrp",
+        "mld",
+        "nfsiod",
+        "scsi_eh_0",
+        "tpm_dev_wq",
+        "vfio-irqfd-clea",
+        "writeback",
     ]
 
     return random.choice(kthreads_names)
@@ -602,6 +688,13 @@ def main(argv=None):
     # register exit handler for proper cleanup
     atexit.register(cleanup_sandbox_no_fail, sbx)
 
+    # spin up a disguised sshd on a runtime-chosen port so the control
+    # channel survives samples that kill the standard sshd on port 22.
+    # dump_utils() must run after this so the generated scripts point at
+    # whichever channel ended up active.
+    print("spinning sshd server")
+    sbx.spawn_mgmt_sshd()
+
     # we dump some utility scripts to easily connect to sandbox
     for u in sbx.dump_utils():
         print(f"utility to access your VM: {u}")
@@ -708,7 +801,7 @@ def main(argv=None):
             f"sudo {kunai_dst} {str_kunai_args} 1> {kunai_stdout} 2> {kunai_stderr} &"
         )
 
-        # some ransomware samples kill ongoing SSH connection so we
+        # some ransomware samples kill ongoing SSH connection so we
         # better make a runner script to execute kunai and fetch
         # the results later
         with tempfile.NamedTemporaryFile(mode="w") as fd:
@@ -844,6 +937,12 @@ def main(argv=None):
 
     print("processing pcap file", flush=True)
     if is_not_none_obj(tcpdump_cfg["filter"], str):
+        pcap_filter = tcpdump_cfg["filter"]
+        if sbx.mgmt_ssh_guest_port is not None:
+            # the configured filter only knows to strip the decoy sshd on
+            # guest port 22 (see gen_config.py); the mgmt sshd's port is
+            # only known at runtime, so exclude it here too
+            pcap_filter = f"({pcap_filter}) and not port {sbx.mgmt_ssh_guest_port}"
         tmp_pcap_file = f"{sbx.pcap_file}.tmp"
         subprocess.run(
             [
@@ -852,7 +951,7 @@ def main(argv=None):
                 sbx.pcap_file,
                 "-w",
                 tmp_pcap_file,
-                tcpdump_cfg["filter"],
+                pcap_filter,
             ],
             check=True,
         )
