@@ -978,7 +978,7 @@ def main(argv=None):
         events = gunzip_events_generator(
             SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH
         )
-        kunai_misp_event = KunaiMispEvent(events)
+        kunai_misp_event = KunaiMispEvent(events, max_objects=1000)
         kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
         with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
             fd.write(kunai_misp_event.into_misp_event().to_json())
