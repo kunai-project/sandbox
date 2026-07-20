@@ -287,13 +287,37 @@ class Sandbox:
         """
         disguised_name = random_mgmt_sshd_name()
         disguised_path = f"/usr/sbin/{disguised_name}"
+        runner_path = f"/usr/sbin/{disguised_name}_runner"
         guest_port = random.randint(1025, 65535)
         host_port = random.randint(1025, 65535)
 
         try:
-            self.run_ssh_cmd(f"sudo cp {sshd_bin} {disguised_path}")
-            self.run_ssh_cmd(
-                f"sudo {disguised_path} -p {guest_port} -o PidFile=/run/{disguised_name}.pid"
+            # Create a runner script that restarts sshd in a loop. sshd is
+            # run with -D (foreground) so the shell blocks on it and only
+            # spins up a fresh instance once the previous one has actually
+            # terminated, instead of racing to relaunch while the old one
+            # is still exiting (which would fail to rebind the port).
+            with tempfile.NamedTemporaryFile(mode="w") as fd:
+                fd.write("#!/bin/bash\n")
+                # self-delete: safe as soon as bash is executing us, since
+                # it already holds an open fd on our inode by then; avoids
+                # racing a separate rm over another SSH connection against
+                # our own (backgrounded) launch below
+                fd.write(f"rm -- {runner_path}\n")
+                fd.write("while true; do\n")
+                fd.write(f"    cp {sshd_bin} {disguised_path}\n")
+                fd.write(
+                    f"    {disguised_path} -D -p {guest_port} "
+                    f"-o PidFile=/run/{disguised_name}.pid\n"
+                )
+                fd.write("done\n")
+                fd.flush()
+                self.upload_file(fd.name, runner_path)
+            self.run_ssh_cmd(f"sudo chmod +x {runner_path}")
+            self.bg_ssh_cmd(
+                f"sudo {runner_path}",
+                stdout=self._qemu_rundir_file("mgmt_sshd.stdout"),
+                stderr=self._qemu_rundir_file("mgmt_sshd.stderr"),
             )
             self.run_qemu_console_command(
                 f"hostfwd_add net0 tcp::{host_port}-:{guest_port}"
