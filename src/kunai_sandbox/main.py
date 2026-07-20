@@ -1,3 +1,4 @@
+from pathlib import Path
 import argparse
 import asyncio
 import atexit
@@ -143,7 +144,7 @@ class Sandbox:
             stdin=subprocess.DEVNULL,
         )
 
-    def bg_ssh_cmd(self, cmd: str, stdout, stderr):
+    def bg_ssh_cmd(self, cmd: str, stdout: Path | str, stderr: Path | str) -> None:
         with (
             open(stdout, "w", encoding="utf8") as out_file,
             open(stderr, "w", encoding="utf8") as err_file,
@@ -423,7 +424,7 @@ def cleanup_sandbox_no_fail(sbx: Sandbox):
         print(f"failed at removing pcap: {e}", file=sys.stderr)
 
 
-def compress_file(file_path):
+def compress_file(file_path) -> str | Path:
     # Define the path for the compressed file
     compressed_file_path = f"{file_path}.gz"
 
@@ -435,6 +436,7 @@ def compress_file(file_path):
 
     # Delete the original file
     os.remove(file_path)
+    return compressed_file_path
 
 
 def build_analysis_metadata(sbx, kunai_path, kunai_args, sample_args, timeout):
@@ -475,19 +477,35 @@ def sha256_file(file_path):
     return sha256.hexdigest()
 
 
+def generic_events_generator(
+    reader, sample_hash: str | None, sample_upload_path: str | None):
+    q = Query(True)
+    if sample_upload_path is not None:
+        q.add_exe_path_hit_once([sample_upload_path])
+    if sample_hash is not None:
+        q.add_hashes([sample_hash])
+    for line in reader.readlines():
+        try:
+            event = Event(JqDict(json.loads(line)))
+        except json.JSONDecodeError as e:
+            # can happen if reader is a live-streaming kunai log and this
+            # is the last, still-being-written line
+            print(f"skipping unparsable event line: {e}", file=sys.stderr)
+            continue
+        if q.match(event):
+            yield event
+
+def events_generator(
+    sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str | Path
+):
+    with open(kunai_log_file, "r") as fd:
+        yield from generic_events_generator(fd, sample_hash, sample_upload_path)
+
 def gunzip_events_generator(
-    sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str
+    sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str | Path
 ):
     with gzip.open(kunai_log_file, "r") as fd:
-        q = Query(True)
-        if sample_upload_path is not None:
-            q.add_exe_path_hit_once([sample_upload_path])
-        if sample_hash is not None:
-            q.add_hashes([sample_hash])
-        for line in fd.readlines():
-            event = Event(JqDict(json.loads(line)))
-            if q.match(event):
-                yield event
+        yield from generic_events_generator(fd, sample_hash, sample_upload_path)
 
 
 def random_task_name():
@@ -798,7 +816,7 @@ def main(argv=None):
     META = None
     SAMPLE_STDOUT = os.path.join(args.output_dir, "sample.stdout")
     SAMPLE_STDERR = os.path.join(args.output_dir, "sample.stderr")
-    KUNAI_LOGS_PATH = os.path.join(args.output_dir, "kunai.jsonl.gz")
+    KUNAI_LOGS_PATH = os.path.join(args.output_dir, "kunai.jsonl")
     KUNAI_STDERR = os.path.join(args.output_dir, "kunai.stderr")
     PCAP_PATH = os.path.join(args.output_dir, "dump.pcap")
     GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
@@ -839,23 +857,9 @@ def main(argv=None):
 
         str_kunai_args = " ".join(kunai_cfg["args"])
 
-        # trick to prevent being encrypted by cryptolocker
-        # we store kunai output within /boot directory
-        kunai_stdout = "/boot/kunai.stdout.efi"
-        kunai_stderr = "/boot/kunai.stderr.efi"
         full_kunai_cmd = (
-            f"sudo {kunai_dst} {str_kunai_args} 1> {kunai_stdout} 2> {kunai_stderr} &"
+            f"sudo {kunai_dst} {str_kunai_args}"
         )
-
-        # some ransomware samples kill ongoing SSH connection so we
-        # better make a runner script to execute kunai and fetch
-        # the results later
-        with tempfile.NamedTemporaryFile(mode="w") as fd:
-            fd.write("#!/bin/bash\n")
-            fd.write(f"{full_kunai_cmd}")
-            fd.flush()
-            sbx.upload_file(fd.name, "/tmp/run.sh")
-            sbx.run_ssh_cmd("chmod +x /tmp/run.sh")
 
         # reading bpf trace pipe
         if args.bpf_logs:
@@ -866,20 +870,15 @@ def main(argv=None):
             )
 
         print(f"running kunai: {full_kunai_cmd}", flush=True)
-        sbx.run_ssh_cmd("sudo /tmp/run.sh", capture_output=False)
+        sbx.bg_ssh_cmd(f"{full_kunai_cmd}", stdout=KUNAI_LOGS_PATH, stderr=KUNAI_STDERR)
 
         print("waiting kunai to start", flush=True)
         sleep_time = 0
         while True:
-            # we try to grep for the start of a kunai event object meaning kunai started
-            c = sbx.run_ssh_cmd(
-                f"/usr/bin/grep -E '\"data\":' {kunai_stdout}", check=False
-            )
-            # we found a hit
-            if c.returncode == 0:
+            s = os.stat(KUNAI_LOGS_PATH)
+            if s.st_size > 0:
                 break
             if sleep_time > 30:
-                print(f"last check command stderr: {c.stderr}")
                 raise Exception("kunai took too long to start")
             time.sleep(1)
             sleep_time += 1
@@ -888,7 +887,6 @@ def main(argv=None):
 
         # we delete kunai binary and runner script
         sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
-        sbx.run_ssh_cmd("sudo rm /tmp/run.sh")
 
     if args.test:
         print("running test")
@@ -919,16 +917,10 @@ def main(argv=None):
     print("analysis finished", flush=True)
     print("collecting files", flush=True)
 
-    # we compress output
-    sbx.run_ssh_cmd(f"sudo gzip {kunai_stdout}")
-
-    sbx.download_file(f"{kunai_stdout}.gz", KUNAI_LOGS_PATH)
-    sbx.download_file(kunai_stderr, KUNAI_STDERR)
-
     if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
         print("downloading dropped files")
         cache = set()
-        for e in gunzip_events_generator(
+        for e in events_generator(
             SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH
         ):
             if e["info"]["event"]["name"] == "write_close":
@@ -980,6 +972,9 @@ def main(argv=None):
                     print(f"failed to fetch dropped file {dropped_file}: {e}")
 
     sandbox_stop_no_fail(sbx)
+
+    # We compress kunai log path
+    KUNAI_LOGS_PATH = compress_file(KUNAI_LOGS_PATH)
 
     print("processing pcap file", flush=True)
     if is_not_none_obj(tcpdump_cfg["filter"], str):
