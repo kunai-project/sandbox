@@ -160,7 +160,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "paramiko", specifier = ">=3.5.0" },
-    { name = "pykunai", specifier = ">=0.1.12" },
+    { name = "pykunai", specifier = ">=0.1.13" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qemu-qmp", specifier = ">=0.0.3" },
 ]
@@ -199,16 +199,16 @@ wheels = [
 
 [[package]]
 name = "pykunai"
-version = "0.1.12"
+version = "0.1.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphviz" },
     { name = "pymisp" },
     { name = "toml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/73/24/c06f17ad4e4f49a5052318c2c8b7eb2c9683286f43d8d2328838a93e8c1b/pykunai-0.1.12.tar.gz", hash = "sha256:682f38f506e6c4f46ac26c1e75799a79a49de5705bca40b05215b3265a6d4a74", size = 63257, upload-time = "2026-07-20T09:07:17.143Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/5a/206822d42b5cfa867e9d547a883e31a530798678b5afedcc3fdd0c753d9d/pykunai-0.1.13.tar.gz", hash = "sha256:9d6244389d8c122d29921c6d241d9c3f640df653352490df5c86ef969461ff24", size = 63296, upload-time = "2026-07-20T12:38:28.585Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/b6/88107477ac3c4537e54fab92026c27e5c15fbcec332e01ed9c9ad3026922/pykunai-0.1.12-py3-none-any.whl", hash = "sha256:3dd9a7e7412896b7e6ece94053b3d1dc9dc66a314791dffb6285bc0dc28ef2dc", size = 33671, upload-time = "2026-07-20T09:07:15.915Z" },
+    { url = "https://files.pythonhosted.org/packages/be/8b/4f5ac7c3da1c067e918c8f9b72911afb3cc976c2b7b0aa32a0e707594a95/pykunai-0.1.13-py3-none-any.whl", hash = "sha256:3ff3dd3735d8f91c2c6cfaa0765d9c85f27bab49ec88f75d7dbac8e4d99857cd", size = 33706, upload-time = "2026-07-20T12:38:27.353Z" },
 ]
 
 [[package]]
