@@ -287,7 +287,8 @@ class Sandbox:
         """
         disguised_name = random_mgmt_sshd_name()
         disguised_path = f"/usr/sbin/{disguised_name}"
-        runner_path = f"/usr/sbin/{disguised_name}_runner"
+        # Must be in RW location for normal user
+        runner_path = f"/tmp/{disguised_name}_runner"
         guest_port = random.randint(1025, 65535)
         host_port = random.randint(1025, 65535)
 
