@@ -243,6 +243,22 @@ class Sandbox:
                 f"Qemu Command: {qemu_cmd} return_code={rc}\nstderr={stderr}"
             )
 
+    def wait_ready(self, timeout=30) -> bool:
+        """
+        Waits for the guest to actually accept SSH connections on the
+        current channel. Resuming a QEMU snapshot isn't instant (memory
+        restore, host load, ...), so anything that talks SSH right after
+        start() can race the guest and fail (e.g. a banner-read timeout).
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                self.run_ssh_cmd("true")
+                return True
+            except subprocess.CalledProcessError:
+                time.sleep(1)
+        return False
+
     def dump_utils(self):
         bin_dir = self._qemu_rundir_file("bin")
         os.makedirs(bin_dir, exist_ok=True)
@@ -712,6 +728,11 @@ def main(argv=None):
 
     # register exit handler for proper cleanup
     atexit.register(cleanup_sandbox_no_fail, sbx)
+
+    # resuming the snapshot isn't instant; wait until the guest is
+    # actually reachable before anything below tries to use SSH
+    if not sbx.wait_ready():
+        raise SandboxException("sandbox did not become reachable over SSH in time")
 
     # spin up a disguised sshd on a runtime-chosen port so the control
     # channel survives samples that kill the standard sshd on port 22.
