@@ -1,3 +1,4 @@
+from pathlib import Path
 import argparse
 import asyncio
 import atexit
@@ -34,6 +35,9 @@ class Sandbox:
         self._qemu_process = None
         _, self._pcap_file = tempfile.mkstemp(prefix="kunai-sandbox-", suffix=".pcap")
         self._ssh_port = random.randint(1025, 65535)
+        # guest-side port of the mgmt sshd, set once spawn_mgmt_sshd()
+        # succeeds; used to strip its traffic out of the recorded pcap
+        self._mgmt_ssh_guest_port = None
         self._bg_subproc: list[subprocess.Popen[bytes]] = []
         self.__scp_client = None
         # this is set by main
@@ -47,6 +51,10 @@ class Sandbox:
     @property
     def pcap_file(self) -> str:
         return self._pcap_file
+
+    @property
+    def mgmt_ssh_guest_port(self) -> int | None:
+        return self._mgmt_ssh_guest_port
 
     @property
     def qemu_config(self) -> dict:
@@ -136,7 +144,7 @@ class Sandbox:
             stdin=subprocess.DEVNULL,
         )
 
-    def bg_ssh_cmd(self, cmd: str, stdout, stderr):
+    def bg_ssh_cmd(self, cmd: str, stdout: Path | str, stderr: Path | str) -> None:
         with (
             open(stdout, "w", encoding="utf8") as out_file,
             open(stderr, "w", encoding="utf8") as err_file,
@@ -236,6 +244,22 @@ class Sandbox:
                 f"Qemu Command: {qemu_cmd} return_code={rc}\nstderr={stderr}"
             )
 
+    def wait_ready(self, timeout=30) -> bool:
+        """
+        Waits for the guest to actually accept SSH connections on the
+        current channel. Resuming a QEMU snapshot isn't instant (memory
+        restore, host load, ...), so anything that talks SSH right after
+        start() can race the guest and fail (e.g. a banner-read timeout).
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                self.run_ssh_cmd("true")
+                return True
+            except subprocess.CalledProcessError:
+                time.sleep(1)
+        return False
+
     def dump_utils(self):
         bin_dir = self._qemu_rundir_file("bin")
         os.makedirs(bin_dir, exist_ok=True)
@@ -268,6 +292,83 @@ class Sandbox:
         os.chmod(cp_from, 0o0700)
 
         return [ssh_util, cp_to, cp_from]
+
+    def spawn_mgmt_sshd(self, sshd_bin="/usr/sbin/sshd", timeout=15) -> bool:
+        """
+        Spawns a second sshd in the guest, disguised as a kernel worker
+        thread and reachable on a runtime-chosen port added via QMP
+        hostfwd_add. This gives us a control channel independent from the
+        sshd on port 22, which samples can (and do) kill outright. On any
+        failure this leaves self._ssh_port untouched, i.e. falls back to
+        the port 22 channel used so far.
+        """
+        disguised_name = random_mgmt_sshd_name()
+        disguised_path = f"/usr/sbin/{disguised_name}"
+        # Must be in RW location for normal user
+        runner_path = f"/tmp/{disguised_name}_runner"
+        guest_port = random.randint(1025, 65535)
+        host_port = random.randint(1025, 65535)
+
+        try:
+            # Create a runner script that restarts sshd in a loop. sshd is
+            # run with -D (foreground) so the shell blocks on it and only
+            # spins up a fresh instance once the previous one has actually
+            # terminated, instead of racing to relaunch while the old one
+            # is still exiting (which would fail to rebind the port).
+            with tempfile.NamedTemporaryFile(mode="w") as fd:
+                fd.write("#!/bin/bash\n")
+                # self-delete: safe as soon as bash is executing us, since
+                # it already holds an open fd on our inode by then; avoids
+                # racing a separate rm over another SSH connection against
+                # our own (backgrounded) launch below
+                fd.write(f"rm -- {runner_path}\n")
+                fd.write("while true; do\n")
+                fd.write(f"    cp {sshd_bin} {disguised_path}\n")
+                fd.write(
+                    f"    {disguised_path} -D -p {guest_port} "
+                    f"-o PidFile=/run/{disguised_name}.pid\n"
+                )
+                fd.write("done\n")
+                fd.flush()
+                self.upload_file(fd.name, runner_path)
+            self.run_ssh_cmd(f"sudo chmod +x {runner_path}")
+            self.bg_ssh_cmd(
+                f"sudo {runner_path}",
+                stdout=self._qemu_rundir_file("mgmt_sshd.stdout"),
+                stderr=self._qemu_rundir_file("mgmt_sshd.stderr"),
+            )
+            self.run_qemu_console_command(
+                f"hostfwd_add net0 tcp::{host_port}-:{guest_port}"
+            )
+        except Exception as e:
+            print(
+                f"failed to bootstrap mgmt sshd, falling back to port 22: {e}",
+                file=sys.stderr,
+            )
+            return False
+
+        # verify the new channel actually works before switching over to it
+        previous_port = self._ssh_port
+        self._ssh_port = host_port
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                self.run_ssh_cmd("true")
+                print(
+                    f"mgmt sshd ready on host port {host_port} "
+                    f"(guest port {guest_port}, disguised as '{disguised_name}')"
+                )
+                self._mgmt_ssh_guest_port = guest_port
+                return True
+            except subprocess.CalledProcessError:
+                time.sleep(1)
+
+        print(
+            "mgmt sshd did not come up in time, falling back to port 22",
+            file=sys.stderr,
+        )
+        self._ssh_port = previous_port
+        return False
 
     def run_qemu_console_command(self, command: str):
         return self.run_qmp_command("human-monitor-command", {"command-line": command})
@@ -323,7 +424,7 @@ def cleanup_sandbox_no_fail(sbx: Sandbox):
         print(f"failed at removing pcap: {e}", file=sys.stderr)
 
 
-def compress_file(file_path):
+def compress_file(file_path) -> str | Path:
     # Define the path for the compressed file
     compressed_file_path = f"{file_path}.gz"
 
@@ -335,6 +436,7 @@ def compress_file(file_path):
 
     # Delete the original file
     os.remove(file_path)
+    return compressed_file_path
 
 
 def build_analysis_metadata(sbx, kunai_path, kunai_args, sample_args, timeout):
@@ -375,19 +477,35 @@ def sha256_file(file_path):
     return sha256.hexdigest()
 
 
+def generic_events_generator(
+    reader, sample_hash: str | None, sample_upload_path: str | None):
+    q = Query(True)
+    if sample_upload_path is not None:
+        q.add_exe_path_hit_once([sample_upload_path])
+    if sample_hash is not None:
+        q.add_hashes([sample_hash])
+    for line in reader.readlines():
+        try:
+            event = Event(JqDict(json.loads(line)))
+        except json.JSONDecodeError as e:
+            # can happen if reader is a live-streaming kunai log and this
+            # is the last, still-being-written line
+            print(f"skipping unparsable event line: {e}", file=sys.stderr)
+            continue
+        if q.match(event):
+            yield event
+
+def events_generator(
+    sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str | Path
+):
+    with open(kunai_log_file, "r") as fd:
+        yield from generic_events_generator(fd, sample_hash, sample_upload_path)
+
 def gunzip_events_generator(
-    sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str
+    sample_hash: str | None, sample_upload_path: str | None, kunai_log_file: str | Path
 ):
     with gzip.open(kunai_log_file, "r") as fd:
-        q = Query(True)
-        if sample_upload_path is not None:
-            q.add_exe_path_hit_once([sample_upload_path])
-        if sample_hash is not None:
-            q.add_hashes([sample_hash])
-        for line in fd.readlines():
-            event = Event(JqDict(json.loads(line)))
-            if q.match(event):
-                yield event
+        yield from generic_events_generator(fd, sample_hash, sample_upload_path)
 
 
 def random_task_name():
@@ -417,6 +535,33 @@ def random_task_name():
         "psimon",
         "rcub",
         "watchdogd",
+    ]
+
+    return random.choice(kthreads_names)
+
+
+def random_mgmt_sshd_name():
+    # separate pool from random_task_name() so the mgmt sshd and the
+    # relocated kunai binary never end up disguised under the same name
+    # in a given run
+    kthreads_names = [
+        "acpi_thermal_pm",
+        "ata_sff",
+        "blkcg_punt_bio",
+        "cfg80211",
+        "charger_manager",
+        "devfreq_wq",
+        "edac-poller",
+        "inet_frag_wq",
+        "kblockd",
+        "kintegrityd",
+        "kstrp",
+        "mld",
+        "nfsiod",
+        "scsi_eh_0",
+        "tpm_dev_wq",
+        "vfio-irqfd-clea",
+        "writeback",
     ]
 
     return random.choice(kthreads_names)
@@ -602,6 +747,18 @@ def main(argv=None):
     # register exit handler for proper cleanup
     atexit.register(cleanup_sandbox_no_fail, sbx)
 
+    # resuming the snapshot isn't instant; wait until the guest is
+    # actually reachable before anything below tries to use SSH
+    if not sbx.wait_ready():
+        raise SandboxException("sandbox did not become reachable over SSH in time")
+
+    # spin up a disguised sshd on a runtime-chosen port so the control
+    # channel survives samples that kill the standard sshd on port 22.
+    # dump_utils() must run after this so the generated scripts point at
+    # whichever channel ended up active.
+    print("spinning sshd server")
+    sbx.spawn_mgmt_sshd()
+
     # we dump some utility scripts to easily connect to sandbox
     for u in sbx.dump_utils():
         print(f"utility to access your VM: {u}")
@@ -659,7 +816,7 @@ def main(argv=None):
     META = None
     SAMPLE_STDOUT = os.path.join(args.output_dir, "sample.stdout")
     SAMPLE_STDERR = os.path.join(args.output_dir, "sample.stderr")
-    KUNAI_LOGS_PATH = os.path.join(args.output_dir, "kunai.jsonl.gz")
+    KUNAI_LOGS_PATH = os.path.join(args.output_dir, "kunai.jsonl")
     KUNAI_STDERR = os.path.join(args.output_dir, "kunai.stderr")
     PCAP_PATH = os.path.join(args.output_dir, "dump.pcap")
     GRAPH_PATH = os.path.join(args.output_dir, "graph.svg")
@@ -700,23 +857,9 @@ def main(argv=None):
 
         str_kunai_args = " ".join(kunai_cfg["args"])
 
-        # trick to prevent being encrypted by cryptolocker
-        # we store kunai output within /boot directory
-        kunai_stdout = "/boot/kunai.stdout.efi"
-        kunai_stderr = "/boot/kunai.stderr.efi"
         full_kunai_cmd = (
-            f"sudo {kunai_dst} {str_kunai_args} 1> {kunai_stdout} 2> {kunai_stderr} &"
+            f"sudo {kunai_dst} {str_kunai_args}"
         )
-
-        # some ransomware samples kill ongoing SSH connection so we
-        # better make a runner script to execute kunai and fetch
-        # the results later
-        with tempfile.NamedTemporaryFile(mode="w") as fd:
-            fd.write("#!/bin/bash\n")
-            fd.write(f"{full_kunai_cmd}")
-            fd.flush()
-            sbx.upload_file(fd.name, "/tmp/run.sh")
-            sbx.run_ssh_cmd("chmod +x /tmp/run.sh")
 
         # reading bpf trace pipe
         if args.bpf_logs:
@@ -727,20 +870,15 @@ def main(argv=None):
             )
 
         print(f"running kunai: {full_kunai_cmd}", flush=True)
-        sbx.run_ssh_cmd("sudo /tmp/run.sh", capture_output=False)
+        sbx.bg_ssh_cmd(f"{full_kunai_cmd}", stdout=KUNAI_LOGS_PATH, stderr=KUNAI_STDERR)
 
         print("waiting kunai to start", flush=True)
         sleep_time = 0
         while True:
-            # we try to grep for the start of a kunai event object meaning kunai started
-            c = sbx.run_ssh_cmd(
-                f"/usr/bin/grep -E '\"data\":' {kunai_stdout}", check=False
-            )
-            # we found a hit
-            if c.returncode == 0:
+            s = os.stat(KUNAI_LOGS_PATH)
+            if s.st_size > 0:
                 break
             if sleep_time > 30:
-                print(f"last check command stderr: {c.stderr}")
                 raise Exception("kunai took too long to start")
             time.sleep(1)
             sleep_time += 1
@@ -749,7 +887,6 @@ def main(argv=None):
 
         # we delete kunai binary and runner script
         sbx.run_ssh_cmd(f"sudo rm {kunai_dst}")
-        sbx.run_ssh_cmd("sudo rm /tmp/run.sh")
 
     if args.test:
         print("running test")
@@ -780,16 +917,10 @@ def main(argv=None):
     print("analysis finished", flush=True)
     print("collecting files", flush=True)
 
-    # we compress output
-    sbx.run_ssh_cmd(f"sudo gzip {kunai_stdout}")
-
-    sbx.download_file(f"{kunai_stdout}.gz", KUNAI_LOGS_PATH)
-    sbx.download_file(kunai_stderr, KUNAI_STDERR)
-
     if args.SAMPLE_COMMAND_LINE and not args.no_dropped:
         print("downloading dropped files")
         cache = set()
-        for e in gunzip_events_generator(
+        for e in events_generator(
             SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH
         ):
             if e["info"]["event"]["name"] == "write_close":
@@ -842,8 +973,17 @@ def main(argv=None):
 
     sandbox_stop_no_fail(sbx)
 
+    # We compress kunai log path
+    KUNAI_LOGS_PATH = compress_file(KUNAI_LOGS_PATH)
+
     print("processing pcap file", flush=True)
     if is_not_none_obj(tcpdump_cfg["filter"], str):
+        pcap_filter = tcpdump_cfg["filter"]
+        if sbx.mgmt_ssh_guest_port is not None:
+            # the configured filter only knows to strip the decoy sshd on
+            # guest port 22 (see gen_config.py); the mgmt sshd's port is
+            # only known at runtime, so exclude it here too
+            pcap_filter = f"({pcap_filter}) and not port {sbx.mgmt_ssh_guest_port}"
         tmp_pcap_file = f"{sbx.pcap_file}.tmp"
         subprocess.run(
             [
@@ -852,7 +992,7 @@ def main(argv=None):
                 sbx.pcap_file,
                 "-w",
                 tmp_pcap_file,
-                tcpdump_cfg["filter"],
+                pcap_filter,
             ],
             check=True,
         )
@@ -879,7 +1019,7 @@ def main(argv=None):
         events = gunzip_events_generator(
             SAMPLE_HASH, SAMPLE_UPLOAD_PATH, KUNAI_LOGS_PATH
         )
-        kunai_misp_event = KunaiMispEvent(events)
+        kunai_misp_event = KunaiMispEvent(events, max_objects=1000)
         kunai_misp_event.with_sample(args.SAMPLE_COMMAND_LINE[0])
         with open(MISP_EVENT_PATH, "w", encoding="utf8") as fd:
             fd.write(kunai_misp_event.into_misp_event().to_json())
